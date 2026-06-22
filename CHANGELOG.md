@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [1.0.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.3.0...kyde-v1.0.0) (2026-06-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* terminal
+
+### Features
+
+* terminal ([ddffbf5](https://github.com/kyle-ssg/kyde/commit/ddffbf5b61d2857ce4c20cf69bf22f723e9c3de1))
+
 ## [0.3.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.2.0...kyde-v0.3.0) (2026-06-22)
 
 
