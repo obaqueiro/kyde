@@ -21,6 +21,8 @@ mod remote_img;
 mod render;
 mod scratch;
 mod shellcmd;
+#[cfg(feature = "terminal")]
+mod terminal;
 mod theme;
 mod tree;
 
@@ -54,7 +56,10 @@ actions!(
         ModeBrowse,
         Actions,
         NewScratch,
-        EscapeKey
+        EscapeKey,
+        ToggleTerminal,
+        NewTerminalTab,
+        ClearTerminal
     ]
 );
 // File-finder navigation (fixed keys, context "FileFinder").
@@ -132,6 +137,15 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
     // Standard quit shortcut (not user-configurable).
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    // Toggle the bottom terminal panel (fixed key, IDE-standard); ⌘T = new tab while the
+    // terminal is focused (scoped to its key context so it doesn't shadow elsewhere).
+    #[cfg(feature = "terminal")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-`", ToggleTerminal, None),
+        KeyBinding::new("cmd-t", NewTerminalTab, Some("Terminal")),
+        // ⌘K clears the terminal; scoped to its context so it overrides the commit binding.
+        KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
+    ]);
     // In-editor find / replace (fixed keys).
     cx.bind_keys([
         KeyBinding::new("cmd-f", FindInFile, None),
@@ -428,6 +442,10 @@ struct Kyde {
     /// FPS monitor (toggled from the Kyde menu): smoothed frames-per-second + last frame time.
     show_fps: bool,
     fps_value: f32,
+    /// Throttled snapshot of `fps_value` — the value the overlay displays AND the screenshot
+    /// harness reads from `KYDE_FPS_FILE`, kept identical so a gated capture's on-screen
+    /// number matches the value the gate accepted.
+    fps_shown: f32,
     fps_last: Option<std::time::Instant>,
     /// Screenshot harness only: throttles the `KYDE_FPS_FILE` publish to ~5/sec so the disk
     /// write doesn't itself drop frames (a per-frame syscall at 120fps perturbs the reading).
@@ -521,6 +539,23 @@ struct Kyde {
     push_files: Vec<ChangedFile>,
     /// Base revision those files are diffed against (`@{u}` or the empty tree).
     push_base: String,
+
+    // Bottom terminal panel (gated behind the `terminal` Cargo feature).
+    /// One `TerminalView` entity per tab, left→right in open order.
+    #[cfg(feature = "terminal")]
+    term_tabs: Vec<Entity<terminal::TerminalView>>,
+    /// Active terminal tab index into `term_tabs`.
+    #[cfg(feature = "terminal")]
+    term_active: usize,
+    /// Whether the bottom terminal panel is visible.
+    #[cfg(feature = "terminal")]
+    term_open: bool,
+    /// Height (px) of the terminal panel, drag-resizable via its top divider.
+    #[cfg(feature = "terminal")]
+    term_height: f32,
+    /// True while dragging the terminal panel's top divider.
+    #[cfg(feature = "terminal")]
+    term_resizing: bool,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -1117,6 +1152,8 @@ impl gpui::AssetSource for Assets {
         let bytes: &'static [u8] = match path {
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
             "icons/git-branch.svg" => include_bytes!("../assets/icons/git-branch.svg"),
+            #[cfg(feature = "terminal")]
+            "icons/terminal.svg" => include_bytes!("../assets/icons/terminal.svg"),
             "icons/file-lines.svg" => include_bytes!("../assets/icons/file-lines.svg"),
             "icons/image.svg" => include_bytes!("../assets/icons/image.svg"),
             "icons/ban.svg" => include_bytes!("../assets/icons/ban.svg"),
@@ -1395,6 +1432,20 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             // Negative Y offset = scrolled down into the file.
             view.file_scroll
                 .set_offset(gpui::point(px(0.0), px(-600.0 * editor::line_height_px())));
+            cx.notify();
+        }
+        // Browse view with the bottom terminal panel open, seeded with a couple of commands
+        // so the shot shows a live shell (prompt + output), not a bare box.
+        #[cfg(feature = "terminal")]
+        "terminal" => {
+            set_packs(view, &["rust"]);
+            view.open_file(PathBuf::from("src/terminal.rs"), cx);
+            view.term_open = true;
+            view.new_terminal_tab(cx);
+            if let Some(t) = view.term_tabs.last() {
+                t.read(cx).send_input("git status && ls src\n");
+            }
+            view.focus_active_terminal(window, cx);
             cx.notify();
         }
         other => eprintln!("KYDE_SHOT: unknown state {other:?}"),

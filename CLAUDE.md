@@ -53,6 +53,8 @@ src/git.rs    Repo: discover/status/base_content/working_content/stage/unstage/
 src/diff.rs   FileDiff::compute() → line Hunks + word ranges (two-phase, like Zed/IntelliJ).
               FileDiff::hunk_patch() builds a unified-diff patch for one hunk. Stable.
 src/theme.rs  Original hand-authored dark palette (Darcula-family style). Stable.
+src/terminal.rs  Embedded PTY terminal (TerminalView entity + TerminalElement), gated
+              behind the `terminal` Cargo feature. See "Terminal panel" below.
 ```
 
 ## Theme — runtime config (`src/theme.rs` + `~/.config/kyde/theme.json`)
@@ -84,6 +86,33 @@ file. Key colors and accents:
 - Secondary button = transparent bg + `divider` border + `secondary_text`.
 - `status_*`, `diff_*_bg`, `syn_*` round out the palette. `syn_identifier`/`syn_operator`
   set to `#D1D3D9` so general code text matches the general text color.
+
+## Terminal panel (src/terminal.rs — `terminal` Cargo feature)
+A real PTY-backed VTE terminal, bottom-docked with multi-tab support. **Gated behind the
+`terminal` Cargo feature** (in `default`): off → the module + alacritty's ~2MB of `.rodata`
+parse tables leave the binary entirely, same compile-time `cfg` gate as the language packs
+(`cargo build --no-default-features --features rust,json` drops it). Engine = **`alacritty_terminal`
+0.26** (Apache-2.0, the crate Zed uses) — grid + VTE + PTY in one. `futures` provides the
+wakeup channel.
+- `TerminalView` (Entity, Focusable): owns `Arc<FairMutex<Term<EventProxy>>>` + a `Notifier`
+  (writes input/resize to the PTY) + the IO-thread `JoinHandle`. Typed text + control/arrow
+  keys are translated to PTY bytes in `on_key` (Up/Down = shell history `ESC[A/B`, Ctrl+letter
+  = control byte, Cmd-V = paste w/ bracketed-paste mode). **History, tab-completion, line
+  editing are the shell's job** — we only relay keystrokes + render bytes.
+- `EventProxy` (alacritty `EventListener`): the IO thread can't touch gpui entities (not
+  `Send`), so it forwards `Event`s over a `futures::mpsc` channel to a `cx.spawn` foreground
+  pump (`on_event`) → repaint on `Wakeup`, write-back on `PtyWrite`, title/exit/clipboard.
+- `TerminalElement` (custom Element, like `editor::EditorElement`): each frame locks the grid,
+  measures the monospace cell, computes cols/rows from bounds + `resize`s the PTY, then shapes
+  one `ShapedLine` per visible row with per-cell fg/bg (resolved via `ANSI_PALETTE` / 256-cube
+  in `default_indexed`, OSC overrides honoured) + a block/beam/underline cursor.
+- State on `Kyde` (all `#[cfg(feature = "terminal")]`): `term_tabs: Vec<Entity<TerminalView>>`,
+  `term_active`, `term_open`, `term_height`, `term_resizing`. `act_toggle_terminal` (⌃`)
+  toggles the panel + lazily spawns the first tab; `render_terminal_panel` draws the drag-resize
+  divider + tab strip (title/×/＋, IntelliJ-style) + active terminal. Panel is only shown with a
+  project open (the shell roots at `repo_root`).
+- KNOWN SCAFFOLD GAPS: no mouse text-selection/copy yet (Cmd-C); Esc dispatches the app
+  `EscapeKey` (root "Kyde" context) instead of reaching the terminal; no scrollback search.
 
 ## Build / run
 Rust 1.96 + Metal Toolchain are installed. gpui needs Apple's Metal Toolchain to compile
