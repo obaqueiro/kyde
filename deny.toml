@@ -1,0 +1,49 @@
+# cargo-deny config — supply-chain + license enforcement.
+# Run locally: cargo install cargo-deny && cargo deny check
+# CI runs this on every push/PR (see .github/workflows/cargo-deny.yml).
+
+[advisories]
+# Fail on RustSec security advisories.
+version = 2
+yanked = "deny"
+# Only flag *unmaintained* crates among our own (workspace/direct) deps — gpui (Zed's
+# framework) drags in a long tail of transitively-unmaintained crates (async-std, instant,
+# paste, proc-macro-error2, rustls-pemfile, …) with no safe upgrade available. Real
+# *security* vulnerabilities in transitive deps still fail; only the unmaintained lint is scoped.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# Allowlist mirrors ThirdPartyNotices.txt: the dep tree is predominantly
+# MIT / Apache-2.0, plus the usual permissive long tail. Anything outside
+# this list trips CI so a copyleft dep can never sneak in unnoticed.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "OFL-1.1",
+    "BSL-1.0",
+    # Permissive licenses pulled in transitively by gpui's HTTP/TLS + LLVM-derived deps.
+    "NCSA",                # University of Illinois/NCSA Open Source License (permissive)
+    "CDLA-Permissive-2.0", # Community Data License Agreement — Permissive (webpki-roots CA data)
+]
+confidence-threshold = 0.9
+
+[bans]
+# Warn (don't fail) on duplicate versions — common and noisy in big trees.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

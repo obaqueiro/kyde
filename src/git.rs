@@ -1,0 +1,427 @@
+//! Git layer. Shells out to the `git` binary on a background-friendly API,
+//! exactly like Zed's `crates/git` (no libgit2). Pure Rust — compiles standalone.
+
+use anyhow::{anyhow, Context, Result};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflict,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangedFile {
+    pub path: PathBuf,
+    pub status: FileStatus,
+}
+
+pub struct Repo {
+    root: PathBuf,
+}
+
+impl Repo {
+    /// Open repo containing `path` (walks up to the git root).
+    pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
+        let out = git(path.as_ref(), &["rev-parse", "--show-toplevel"])?;
+        let root = PathBuf::from(out.trim());
+        if root.as_os_str().is_empty() {
+            return Err(anyhow!("not a git repository"));
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Plain-text (fixed-string, case-insensitive) content search across tracked +
+    /// untracked working-tree files (gitignored excluded), via `git grep`. Returns
+    /// `(repo-relative path, 1-based line, line text)` hits, capped. `git grep` exits
+    /// 1 on "no matches" — we treat that (and any spawn/exit error) as an empty list,
+    /// not an `Err`, so the live finder never flashes errors while you type.
+    pub fn grep(&self, query: &str) -> Vec<(PathBuf, u32, String)> {
+        const CAP: usize = 500;
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let out = Command::new("git")
+            .current_dir(&self.root)
+            .args([
+                "grep",
+                "--no-color",
+                "-F", // fixed string (not a regex)
+                "-n", // line numbers
+                "-I", // skip binary files
+                "-i", // case-insensitive
+                "--untracked",
+                "-e",
+                query,
+            ])
+            .output();
+        let Ok(out) = out else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut hits = Vec::new();
+        // Each line: `path:lineno:content`. Repo-relative paths on macOS have no ':',
+        // so splitting on the first two ':' is unambiguous.
+        for line in text.lines() {
+            let mut it = line.splitn(3, ':');
+            let (Some(path), Some(num), Some(content)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            let Ok(n) = num.parse::<u32>() else { continue };
+            hits.push((PathBuf::from(path), n, content.to_string()));
+            if hits.len() >= CAP {
+                break;
+            }
+        }
+        hits
+    }
+
+    /// `git status --porcelain=v1 -z` parsed into changed files.
+    pub fn status(&self) -> Result<Vec<ChangedFile>> {
+        let raw = git(
+            &self.root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let mut files = Vec::new();
+        // Records are NUL-separated; rename records consume an extra field.
+        let mut parts = raw.split('\0').filter(|s| !s.is_empty());
+        while let Some(rec) = parts.next() {
+            if rec.len() < 3 {
+                continue;
+            }
+            let x = rec.as_bytes()[0] as char; // staged (index) column
+            let y = rec.as_bytes()[1] as char; // unstaged (worktree) column
+            let path = rec[3..].to_string();
+            if x == 'R' || y == 'R' {
+                // rename: the "from" path follows as the next NUL field
+                let _from = parts.next();
+            }
+            let status = classify(x, y);
+            // No quote/escape handling needed: `-z` makes git emit paths raw and
+            // NUL-terminated (quoting/C-escaping is the non-`-z` behavior).
+            files.push(ChangedFile {
+                path: PathBuf::from(path),
+                status,
+            });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
+    }
+
+    /// Worktree (HEAD or index) version of a file = the "before" side of the diff.
+    /// Returns the staged blob if present, else HEAD.
+    pub fn base_content(&self, rel: &Path) -> Result<String> {
+        // `:path` = index version; fall back to HEAD.
+        let p = rel.to_string_lossy();
+        match git(&self.root, &["show", &format!(":{}", p)]) {
+            Ok(s) => Ok(s),
+            Err(_) => git(&self.root, &["show", &format!("HEAD:{}", p)]).or(Ok(String::new())),
+        }
+    }
+
+    /// Current on-disk content = the "after" side. Errors if the file is binary
+    /// (contains a NUL byte) or not valid UTF-8, so callers treat it as
+    /// not-diffable/not-editable rather than silently truncating it to empty
+    /// (which, fed through the diff editor's autosave, would erase the file).
+    pub fn working_content(&self, rel: &Path) -> Result<String> {
+        let full = self.root.join(rel);
+        let bytes = std::fs::read(&full).with_context(|| format!("reading {:?}", full))?;
+        if bytes.contains(&0) {
+            return Err(anyhow!("binary file: {:?}", rel));
+        }
+        String::from_utf8(bytes).map_err(|_| anyhow!("not valid UTF-8: {:?}", rel))
+    }
+
+    pub fn stage(&self, rel: &Path) -> Result<()> {
+        git(&self.root, &["add", "--", &rel.to_string_lossy()]).map(|_| ())
+    }
+
+    pub fn unstage(&self, rel: &Path) -> Result<()> {
+        git(
+            &self.root,
+            &["restore", "--staged", "--", &rel.to_string_lossy()],
+        )
+        .map(|_| ())
+    }
+
+    /// Discard all changes to a tracked file (index + worktree → HEAD).
+    pub fn discard(&self, rel: &Path) -> Result<()> {
+        git(
+            &self.root,
+            &["checkout", "HEAD", "--", &rel.to_string_lossy()],
+        )
+        .map(|_| ())
+    }
+
+    /// Remove a file from the working tree (used to delete added/untracked files on rollback).
+    pub fn delete_file(&self, rel: &Path) -> Result<()> {
+        std::fs::remove_file(self.root.join(rel)).map_err(Into::into)
+    }
+
+    /// Rename/move a working-tree file. Plain `fs::rename` (git picks up the
+    /// rename on its next status), creating the destination's parent dirs.
+    /// Refuses to clobber an existing destination.
+    pub fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let (src, dst) = (self.root.join(from), self.root.join(to));
+        if dst.exists() {
+            return Err(anyhow!("{:?} already exists", to));
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::rename(&src, &dst).with_context(|| format!("renaming {:?} -> {:?}", src, dst))?;
+        Ok(())
+    }
+
+    pub fn commit(&self, message: &str) -> Result<()> {
+        git_stdin(&self.root, &["commit", "-F", "-"], message).map(|_| ())
+    }
+
+    /// All tracked + untracked-but-not-ignored files, for the folder-tree view.
+    /// Uses `git ls-files` so .gitignored noise stays out.
+    pub fn list_files(&self) -> Result<Vec<PathBuf>> {
+        let raw = git(
+            &self.root,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        let mut files: Vec<PathBuf> = raw
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        files.sort();
+        files.dedup();
+        Ok(files)
+    }
+
+    /// Current branch name, or None when HEAD is detached / mid-rebase.
+    pub fn current_branch(&self) -> Option<String> {
+        let out = git(&self.root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+        let b = out.trim();
+        (!b.is_empty()).then(|| b.to_string())
+    }
+
+    /// Push the current branch to `origin`, setting upstream when missing.
+    /// `--set-upstream` is harmless when an upstream already exists, so one path
+    /// covers both first push and subsequent pushes. Returns git's stdout.
+    pub fn push(&self) -> Result<String> {
+        match self.current_branch() {
+            Some(b) => git(&self.root, &["push", "--set-upstream", "origin", &b]),
+            None => git(&self.root, &["push"]),
+        }
+    }
+
+    /// How many commits the current branch is ahead of its upstream. With an upstream,
+    /// that's `@{u}..HEAD`. With NO upstream yet (never pushed), every commit on HEAD is
+    /// unpushed, so count them all — otherwise the push button never appears for a first
+    /// push. `None` only when HEAD has no commits / is unborn (nothing to push).
+    pub fn ahead_count(&self) -> Option<usize> {
+        let range = if git(&self.root, &["rev-parse", "@{u}"]).is_ok() {
+            "@{u}..HEAD"
+        } else {
+            "HEAD"
+        };
+        git(&self.root, &["rev-list", "--count", range])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// The base revision a push would be measured against: upstream if set, else
+    /// the empty tree (so a branch with no upstream shows every committed file as added).
+    pub fn push_base(&self) -> String {
+        if git(&self.root, &["rev-parse", "@{u}"]).is_ok() {
+            "@{u}".to_string()
+        } else {
+            // Well-known empty-tree object id — diffing against it lists all of HEAD.
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        }
+    }
+
+    /// Files that differ between `push_base()` and HEAD — i.e. what a push would send.
+    /// Same `ChangedFile` shape as `status()`, so the push modal renders like commit/rollback.
+    pub fn push_files(&self) -> Vec<ChangedFile> {
+        let base = self.push_base();
+        let raw = match git(&self.root, &["diff", "--name-status", "-z", &base, "HEAD"]) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let mut files = Vec::new();
+        // `-z`: NUL-separated fields. Status field, then path; renames/copies emit the
+        // status (e.g. "R100") followed by TWO paths (old, new) — keep the new one.
+        let mut parts = raw.split('\0').filter(|s| !s.is_empty());
+        while let Some(stat) = parts.next() {
+            let code = stat.as_bytes().first().copied().unwrap_or(b'M') as char;
+            let path = if code == 'R' || code == 'C' {
+                let _old = parts.next();
+                parts.next()
+            } else {
+                parts.next()
+            };
+            let Some(path) = path else { break };
+            // name-status gives a single column; map it via the index-column slot.
+            let status = classify(code, ' ');
+            files.push(ChangedFile {
+                path: PathBuf::from(path),
+                status,
+            });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+
+    /// Content of `rel` at a committed revision (e.g. `@{u}` or `HEAD`), empty if the
+    /// file doesn't exist there (added/deleted) — the two sides of a push diff.
+    pub fn committed_content(&self, rev: &str, rel: &Path) -> Result<String> {
+        let spec = format!("{}:{}", rev, rel.to_string_lossy());
+        Ok(git(&self.root, &["show", &spec]).unwrap_or_default())
+    }
+
+    /// Local branches, most-recently-committed first (recency order). The UI
+    /// slices the top few as "Recent" and re-sorts the whole list as "All".
+    pub fn branches(&self) -> Result<Vec<String>> {
+        let raw = git(
+            &self.root,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname:short)",
+                "refs/heads/",
+            ],
+        )?;
+        Ok(raw
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Switch to an existing local branch.
+    pub fn checkout(&self, branch: &str) -> Result<()> {
+        let branch = valid_ref(branch)?;
+        // `<branch> --` pins the argument as a revision, never a pathspec or flag.
+        git(&self.root, &["checkout", branch, "--"]).map(|_| ())
+    }
+
+    /// Create and switch to a new branch off the current HEAD.
+    /// Create a branch. `checkout` switches to it (`-b`/`-B`); otherwise just creates it
+    /// (`branch`). `overwrite` resets an existing branch of the same name (`-B`/`-f`).
+    pub fn create_branch_opts(&self, name: &str, checkout: bool, overwrite: bool) -> Result<()> {
+        let name = valid_ref(name)?;
+        let args: &[&str] = match (checkout, overwrite) {
+            (true, false) => &["checkout", "-b", name],
+            (true, true) => &["checkout", "-B", name],
+            (false, false) => &["branch", name],
+            (false, true) => &["branch", "-f", name],
+        };
+        git(&self.root, args).map(|_| ())
+    }
+
+    /// Write new content to a working-tree file (used by the editor on save).
+    pub fn save_file(&self, rel: &Path, content: &str) -> Result<()> {
+        let full = self.root.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&full, content).with_context(|| format!("writing {:?}", full))?;
+        Ok(())
+    }
+}
+
+fn classify(x: char, y: char) -> FileStatus {
+    match (x, y) {
+        ('?', '?') => FileStatus::Untracked,
+        ('U', _) | (_, 'U') | ('D', 'D') | ('A', 'A') => FileStatus::Conflict,
+        ('A', _) => FileStatus::Added,
+        ('D', _) | (_, 'D') => FileStatus::Deleted,
+        ('R', _) => FileStatus::Renamed,
+        _ => FileStatus::Modified,
+    }
+}
+
+/// Reject a branch/ref name that git would misread as a flag (leading `-`) or
+/// that is empty. Guards the new-branch text box against argument injection;
+/// not a full `git check-ref-format`. Returns the trimmed name on success.
+fn valid_ref(name: &str) -> Result<&str> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err(anyhow!("empty branch name"));
+    }
+    if n.starts_with('-') {
+        return Err(anyhow!("invalid branch name: {n:?}"));
+    }
+    Ok(n)
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {:?}", args))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning git {:?}", args))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped (configured above)")
+        .write_all(stdin.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_ref_rejects_flags_and_empty() {
+        assert!(valid_ref("-f").is_err());
+        assert!(valid_ref("--track").is_err());
+        assert!(valid_ref("   ").is_err());
+        assert!(valid_ref("").is_err());
+        assert_eq!(valid_ref("feature/x").unwrap(), "feature/x");
+        assert_eq!(valid_ref("  main  ").unwrap(), "main"); // trims
+    }
+}

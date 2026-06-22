@@ -1,0 +1,9 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- macOS app-icon tile: rounded square inset with the standard ~100px margin and
+       ~22% corner radius, on a transparent canvas (gives the Dock "chrome" look). -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#191A1C"/>
+  <g transform="translate(100,100) scale(0.8047)">
+    <path d="M142 522V157H187V313.5H241L322 157H371L280.5 332.5L376 522H324.5L239.5 353H187V522H142Z" fill="#D2D3DA"/>
+    <path d="M484.805 612L525.305 505L423.305 247H473.305L537.305 417C539.638 422.667 541.805 429.5 543.805 437.5C545.805 445.167 547.471 451.667 548.805 457C550.138 451.667 551.805 445.167 553.805 437.5C555.805 429.5 557.805 422.667 559.805 417L619.805 247H668.305L532.805 612H484.805Z" fill="#D2D3DA" fill-opacity="0.66"/>
+  </g>
+</svg>

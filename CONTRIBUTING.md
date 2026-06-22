@@ -1,0 +1,92 @@
+# Contributing to Kyde
+
+Thanks for taking a look. Kyde is a small, opinionated tool — a fast native git
+commit/diff view — and contributions are welcome. The author is upfront about not
+being a Rust expert, so PRs that explain the idiomatic way are appreciated. Be kind
+about the `.clone()`s.
+
+## Ground rules
+
+- **If a feature adds a lot of bloat, it should be a plugin**, not core. Language
+  highlighting is the model: gated behind a Cargo feature, off by default at the
+  margins, collapses gracefully when absent. See `Cargo.toml [features]` and
+  `src/plugins.rs`.
+- **Speed is the whole point.** Anything on a per-keystroke, per-frame, or
+  per-file-select hot path must stay fast. If you add such a path, add a `perf_*`
+  guard test (see below).
+- Keep the macOS-native, no-web, no-Electron, no-React constraint.
+
+## Setup
+
+Requires **Rust 1.96** (pinned in `rust-toolchain.toml`; `rustup` picks it up
+automatically). On macOS, gpui compiles Metal shaders and needs Apple's Metal
+Toolchain:
+
+```sh
+xcodebuild -downloadComponent MetalToolchain   # only if a build errors on it
+```
+
+On Linux you need gpui's backend dev libraries — see the `Install Linux deps` step
+in `.github/workflows/build.yml` for the exact `apt` list.
+
+```sh
+cargo build                 # debug build
+cargo run -- /path/to/repo  # run against any git repo (bare = Projects view)
+cargo test                  # logic + perf guard tests
+```
+
+## Before you open a PR
+
+CI runs these and will fail the PR otherwise, so run them locally first:
+
+```sh
+cargo fmt --all                         # then commit the result
+cargo clippy --all-targets -- -D warnings
+cargo test --all
+```
+
+A trim build is also checked in CI — if you touch the feature/grammar wiring,
+verify it still compiles:
+
+```sh
+cargo build --no-default-features --features rust,json,toml
+```
+
+To run those checks automatically, enable the repo's git hooks once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`pre-commit` formats staged Rust files (so a commit can't carry unformatted code into
+CI); `pre-push` runs fmt-check + clippy `-D warnings` + tests before anything leaves your
+machine. Skip a hook with `--no-verify` if you must.
+
+## Tests
+
+- Plain-Rust modules (`git.rs`, `diff.rs`, `highlight.rs`, `theme.rs`, `keymap.rs`,
+  `plugins.rs`, `tree.rs`, `shellcmd.rs`, …) carry unit tests in their own
+  `#[cfg(test)] mod tests` — this is a bin crate with no lib target, so tests live
+  in-module, not in `tests/`.
+- **Perf guards** are named `perf_*` (run just them with `cargo test perf`). They
+  push a representative-sized input through a hot path and assert it finishes under
+  a deliberately loose budget — the goal is catching algorithmic blowups (accidental
+  O(n²), per-keystroke reparse), not 2× CI jitter. Don't tighten them to "realistic"
+  numbers; that only makes them flaky.
+
+## Commits & PRs
+
+- Small, focused commits with a clear message. Reference an issue if there is one.
+- The PR template will ask what changed and how you tested it — fill it in.
+- New user-facing behavior should get a line in `CHANGELOG.md` under `Unreleased`.
+
+## Code layout
+
+`CLAUDE.md` is the deep map of the codebase — every module, the render flow, the
+theme system, the plugin gates. Read it before a non-trivial change; it's the
+fastest way to understand how a piece fits.
+
+## License
+
+By contributing you agree your work is licensed under the project's
+[Apache-2.0](LICENSE) license.

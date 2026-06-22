@@ -1,0 +1,163 @@
+name: release
+
+# release-please owns the whole release: it watches Conventional Commits on main,
+# maintains a "release PR" that bumps Cargo.toml + Cargo.lock + CHANGELOG.md, and
+# on merge cuts the vX.Y.Z tag + GitHub Release. The build job then signs + notarizes the
+# macOS .app and attaches it to that release.
+#
+# macOS-only for now (see README "Known limitations"). The Linux/Windows packaging worked
+# but isn't maintained, so it's parked — commented out below (matrix entries + their package
+# steps), not deleted. Uncomment a platform's matrix entry AND its package step to revive it.
+#
+# Why build runs HERE and not via a tag trigger: tags/releases created with the
+# default GITHUB_TOKEN do NOT trigger other workflows. Keeping build in the same
+# run (gated on release_created) is triggered by the human merge push, so it fires.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Picks up release-please-config.json + .release-please-manifest.json.
+
+  build:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-15
+            bin: kyde
+          # Parked (macOS-only releases for now). These worked; to revive a platform,
+          # uncomment its matrix entry here AND its package step further down.
+          # - name: linux
+          #   os: ubuntu-latest
+          #   bin: kyde
+          # - name: windows
+          #   os: windows-latest
+          #   bin: kyde.exe
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # Parked with the Linux matrix entry above.
+      # - name: Install Linux deps
+      #   if: matrix.name == 'linux'
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y \
+      #       pkg-config libssl-dev libzstd-dev \
+      #       libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+      #       libfontconfig-dev libfreetype-dev \
+      #       libx11-dev libxcb1-dev libvulkan-dev \
+      #       clang cmake
+
+      - name: Build (release)
+        run: cargo build --release
+
+      # Wrap the binary in Kyde.app. bundle-macos.sh ad-hoc-signs it as a baseline so an
+      # unsigned bundle never ships; the next step upgrades that to Developer ID + notarize.
+      - name: Bundle .app
+        if: matrix.name == 'macos'
+        run: ./scripts/bundle-macos.sh
+
+      # Developer ID sign + notarize. No-ops (keeps the ad-hoc app) until the signing secrets
+      # are configured, so releases never break waiting on the Apple setup. Secrets:
+      # MACOS_CERT_P12 (base64 .p12), MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY,
+      # AC_API_KEY_P8 (base64 .p8), AC_API_KEY_ID, AC_API_ISSUER_ID — see .env / README.
+      - name: Sign + notarize (Developer ID)
+        if: matrix.name == 'macos'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_CERT_P12:-}" ]; then
+            echo "Signing secrets not set — shipping the ad-hoc-signed app (right-click -> Open)."
+            exit 0
+          fi
+          # Import the Developer ID cert into a throwaway keychain.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed -e 's/"//g')
+
+          # Re-sign with the Developer ID identity + hardened runtime (required to notarize).
+          codesign --force --timestamp --options runtime \
+            --sign "$MACOS_SIGN_IDENTITY" dist/Kyde.app
+          codesign --verify --strict --verbose=2 dist/Kyde.app
+
+          # Notarize: submit a zip, wait for the verdict, then staple the ticket into the app.
+          ditto -c -k --keepParent dist/Kyde.app "$RUNNER_TEMP/notarize.zip"
+          echo "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/key.p8" --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" --wait
+          xcrun stapler staple dist/Kyde.app
+
+          # Scrub secrets from the runner.
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/key.p8" "$RUNNER_TEMP/notarize.zip"
+          security delete-keychain "$KEYCHAIN"
+
+      - name: Package .app (macos)
+        if: matrix.name == 'macos'
+        run: ditto -c -k --keepParent dist/Kyde.app kyde-macos.zip
+
+      # Parked with the Linux matrix entry above.
+      # - name: Package AppImage (linux)
+      #   if: matrix.name == 'linux'
+      #   run: |
+      #     ./scripts/bundle-linux.sh
+      #     mv dist/Kyde-x86_64.AppImage kyde-linux.AppImage
+
+      # Parked with the Windows matrix entry above.
+      # - name: Package zip (windows)
+      #   if: matrix.name == 'windows'
+      #   shell: pwsh
+      #   run: |
+      #     Compress-Archive -Path target/release/${{ matrix.bin }} -DestinationPath kyde-windows.zip
+
+      - name: Attach to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            kyde-${{ matrix.name }}.* --clobber
