@@ -71,6 +71,19 @@ A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.jso
   <img src="assets/screenshots/markdown-support.png" alt="Markdown support — editing a Markdown file with a live rendered preview pane on the right" width="900">
 </p>
 
+### Terminal
+
+* **Embedded multi-tab terminal** — a real PTY-backed shell (alacritty's VTE engine),
+  bottom-docked, toggled with `⌃\``. Full color, scrollback, resize, multiple tabs.
+* **Mouse select + copy** (`⌘C`), **paste** (`⌘V`, bracketed-paste aware), **`⌘`-click URLs**.
+* History (`↑`), tab-completion, line-editing all work — it's your real shell.
+* Optional: drop it entirely with `--no-default-features` (the `terminal` Cargo feature)
+  for a ~2MB-lighter binary.
+
+<p align="center">
+  <img src="assets/screenshots/terminal.png" alt="Embedded terminal — a multi-tab PTY shell docked at the bottom, running git status + ls with live output and the shell's own git-aware prompt" width="900">
+</p>
+
 ### Git — commit, diff, branches
 
 * **Commit view**: changed-files list + an editable side-by-side diff — base on the left, live working copy on the right, both highlighted.

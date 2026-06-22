@@ -254,6 +254,7 @@ impl Kyde {
             finder_gen: 0,
             show_fps: load_show_fps(),
             fps_value: 0.0,
+            fps_shown: 0.0,
             fps_last: None,
             fps_file_last: None,
             finder_open: false,
@@ -304,6 +305,16 @@ impl Kyde {
             push_win: None,
             push_files: Vec::new(),
             push_base: String::new(),
+            #[cfg(feature = "terminal")]
+            term_tabs: Vec::new(),
+            #[cfg(feature = "terminal")]
+            term_active: 0,
+            #[cfg(feature = "terminal")]
+            term_open: false,
+            #[cfg(feature = "terminal")]
+            term_height: 260.0,
+            #[cfg(feature = "terminal")]
+            term_resizing: false,
         };
         me.refresh();
         me
@@ -2589,5 +2600,82 @@ impl Kyde {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(feature = "terminal")]
+impl Kyde {
+    /// Toggle the bottom terminal panel. Opening it spawns the first tab (lazily, so a
+    /// build that never opens a terminal pays no PTY cost) and focuses it.
+    pub(crate) fn act_toggle_terminal(
+        &mut self,
+        _: &crate::ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.term_open = !self.term_open;
+        if self.term_open {
+            if self.term_tabs.is_empty() {
+                self.new_terminal_tab(cx);
+            }
+            self.focus_active_terminal(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// ⌘T while the terminal is focused: open a fresh tab (panel already open) and focus it.
+    pub(crate) fn act_new_terminal_tab(
+        &mut self,
+        _: &crate::NewTerminalTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.term_open {
+            self.term_open = true;
+        }
+        self.new_terminal_tab(cx);
+        self.focus_active_terminal(window, cx);
+        cx.notify();
+    }
+
+    /// Spawn a new terminal tab rooted at the open project (or `$HOME`) and make it active.
+    pub(crate) fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.repo_root.clone();
+        let view = cx.new(|cx| crate::terminal::TerminalView::new(cwd, cx));
+        // Repaint on title change; close the tab when its context menu's Close is hit.
+        cx.subscribe(&view, |this, v, ev, cx| match ev {
+            crate::terminal::TerminalEvent::TitleChanged => cx.notify(),
+            crate::terminal::TerminalEvent::CloseRequested => {
+                if let Some(idx) = this.term_tabs.iter().position(|t| t == &v) {
+                    this.close_terminal_tab(idx, cx);
+                }
+            }
+        })
+        .detach();
+        self.term_tabs.push(view);
+        self.term_active = self.term_tabs.len() - 1;
+        cx.notify();
+    }
+
+    /// Close a terminal tab; closing the last one hides the panel.
+    pub(crate) fn close_terminal_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.term_tabs.len() {
+            return;
+        }
+        self.term_tabs.remove(idx);
+        if self.term_tabs.is_empty() {
+            self.term_open = false;
+            self.term_active = 0;
+        } else if self.term_active >= self.term_tabs.len() {
+            self.term_active = self.term_tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    /// Move focus to the active terminal tab's widget.
+    pub(crate) fn focus_active_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.term_tabs.get(self.term_active) {
+            window.focus(&view.read(cx).handle());
+        }
     }
 }

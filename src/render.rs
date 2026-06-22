@@ -44,18 +44,26 @@ impl Render for Kyde {
                 }
             }
             self.fps_last = Some(now);
-            // Screenshot harness: publish the live value so screenshots.sh can wait for the
-            // EMA to settle at the display cap before capturing (the launch transient otherwise
-            // freezes a jittery sub-120 reading into the shot). Shot-mode only — gated on the env,
-            // and throttled to ~5/sec so the disk write doesn't itself drop frames.
+            // Both the on-screen overlay and the harness file read `fps_shown`, snapshotted
+            // from the live EMA on a throttle. Keeping them one variable means the captured
+            // frame's number matches what the gate accepted. The throttle is LONG in shot mode
+            // (1.2s): `screencapture` takes ~200ms, and on the busier modal shots the EMA can
+            // jitter below the floor between writes — if the published value changed mid-grab,
+            // the gate's value and the grabbed pixels would diverge (a 120 gate freezing a 108
+            // shot). A 1.2s hold guarantees the value is stable across a whole capture, so a
+            // shot the gate accepts at ≥120 actually shows ≥120. Interactive use keeps the
+            // snappy ~5/sec cadence.
+            let shot_mode = std::env::var_os("KYDE_FPS_FILE").is_some();
+            let throttle = if shot_mode { 1.2 } else { 0.2 };
             let due = self
                 .fps_file_last
-                .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 0.2);
+                .is_none_or(|t| now.duration_since(t).as_secs_f32() >= throttle);
             if due {
+                self.fps_shown = self.fps_value;
                 if let Ok(p) = std::env::var("KYDE_FPS_FILE") {
-                    let _ = std::fs::write(&p, format!("{:.1}", self.fps_value));
-                    self.fps_file_last = Some(now);
+                    let _ = std::fs::write(&p, format!("{:.1}", self.fps_shown));
                 }
+                self.fps_file_last = Some(now);
             }
         }
 
@@ -130,8 +138,10 @@ impl Render for Kyde {
             // Fixed-width: never let a wide editor (many tabs) shrink the rail via flex.
             .flex_none()
             .h_full()
-            // Align the first button with the top of the island (same inset as `body`'s pt).
+            // Align the first button with the top of the island (same inset as `body`'s pt),
+            // and a matching bottom inset so the bottom-pinned terminal toggle sits symmetric.
             .pt(px(theme::FRAME_GAP))
+            .pb(px(theme::FRAME_GAP))
             .bg(theme::get().frame_bg)
             .child(mode_btn(
                 "icons/folder.svg",
@@ -147,6 +157,41 @@ impl Render for Kyde {
                 Mode::Commit,
                 cx,
             ));
+        // Terminal toggle — pinned to the BOTTOM of the rail (IDE-style tool strip), only
+        // when a project is open (the shell roots at the project). A flex spacer between the
+        // top nav and this button pushes it down to the bottom edge.
+        #[cfg(feature = "terminal")]
+        let rail = if self.repo_root.is_some() {
+            let t = theme::get();
+            let active = self.term_open;
+            rail.child(div().flex_1().min_h_0()).child(
+                div()
+                    .id("rail-terminal")
+                    .size(px(38.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .when(active, |d| d.bg(t.bg_light))
+                    .when(!active, |d| d.hover(|d| d.bg(t.bg_mid)))
+                    .cursor_pointer()
+                    .tooltip(move |_w, cx| cx.new(|_| Tip("Terminal  (⌃`)".into())).into())
+                    .child(
+                        svg()
+                            .path("icons/terminal.svg")
+                            .size(px(22.0))
+                            .text_color(if active { t.text } else { t.line_number }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, window, cx| {
+                            this.act_toggle_terminal(&ToggleTerminal, window, cx)
+                        }),
+                    ),
+            )
+        } else {
+            rail
+        };
 
         let inner = match self.mode {
             Mode::Commit => self.render_commit(ui, fs, window, cx),
@@ -165,13 +210,30 @@ impl Render for Kyde {
             .bg(theme::get().frame_bg)
             .child(inner);
 
+        // Right column = body (fills) with the terminal panel docked at its bottom. Keeping
+        // the panel here (NOT a sibling of the full-height rail) means the rail spans the whole
+        // window height, so its bottom-pinned terminal toggle stays put when the panel opens.
+        let right_col = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(body);
+        #[cfg(feature = "terminal")]
+        let right_col = if self.term_open && self.repo_root.is_some() {
+            right_col.child(self.render_terminal_panel(ui, cx))
+        } else {
+            right_col
+        };
+
         let main_row = div()
             .flex()
             .flex_row()
             .flex_1()
             .min_h_0()
             .child(rail)
-            .child(body);
+            .child(right_col);
 
         let mut root = div()
             .key_context("Kyde")
@@ -206,7 +268,14 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::replace_one))
-            .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::replace_all));
+        #[cfg(feature = "terminal")]
+        {
+            root = root
+                .on_action(cx.listener(Self::act_toggle_terminal))
+                .on_action(cx.listener(Self::act_new_terminal_tab));
+        }
+        let root = root
             .on_mouse_move(
                 cx.listener(move |this, e: &gpui::MouseMoveEvent, window, cx| {
                     if this.tree_resizing {
@@ -258,6 +327,14 @@ impl Render for Kyde {
                         drag.handle.set_offset(o);
                         cx.notify();
                     }
+                    #[cfg(feature = "terminal")]
+                    if this.term_resizing {
+                        // Panel height = window bottom (minus status bar) − cursor y.
+                        let vh = f32::from(window.viewport_size().height);
+                        let h = vh - f32::from(e.position.y) - 26.0;
+                        this.term_height = h.clamp(120.0, (vh - 160.0).max(120.0));
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_up(
@@ -274,10 +351,16 @@ impl Render for Kyde {
                         this.sb_drag = None;
                         cx.notify();
                     }
+                    #[cfg(feature = "terminal")]
+                    if this.term_resizing {
+                        this.term_resizing = false;
+                        cx.notify();
+                    }
                 }),
             )
             .child(titlebar)
-            .child(main_row)
+            .child(main_row);
+        let mut root = root
             // Git-op error + crash banners at the bottom (just above the status bar).
             .when(self.op_error.is_some(), |d| {
                 d.child(self.render_op_error_banner(ui, cx))
@@ -330,7 +413,7 @@ impl Render for Kyde {
                     .text_color(t.text)
                     .font_family(theme::font::FAMILY)
                     .text_size(px(11.0))
-                    .child(SharedString::from(format!("{:.0} fps", self.fps_value))),
+                    .child(SharedString::from(format!("{:.0} fps", self.fps_shown))),
             );
         }
         root.into_any_element()
@@ -4763,6 +4846,152 @@ impl Kyde {
                     ))
                     .child(line(theme::font::FAMILY, "Bold · 700", FontWeight::BOLD)),
             )
+            .into_any_element()
+    }
+
+    /// Bottom terminal panel: a drag-resize divider, a tab strip (one tab per shell +
+    /// a new-tab button), and the active terminal filling the rest. Inset to align
+    /// under the islands (left of the activity rail).
+    #[cfg(feature = "terminal")]
+    fn render_terminal_panel(
+        &mut self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        // Tab strip: heading + one chip per shell + a new-tab button.
+        let mut strip = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .h(px(34.0))
+            .px_3()
+            .flex_none()
+            .child(
+                div()
+                    .font_family(ui)
+                    .text_size(px(13.0))
+                    .text_color(t.text)
+                    .child("Terminal"),
+            );
+        for (i, view) in self.term_tabs.iter().enumerate() {
+            let active = i == self.term_active;
+            let mut title = view.read(cx).title.clone();
+            if view.read(cx).exited {
+                title.push_str(" (exited)");
+            }
+            strip = strip.child(
+                div()
+                    .id(("term-tab", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .when(active, |d| d.bg(t.selected_bg))
+                    .when(!active, |d| d.hover(|d| d.bg(t.bg_mid)))
+                    .cursor_pointer()
+                    .font_family(ui)
+                    .text_size(px(12.0))
+                    .text_color(if active {
+                        t.primary_text
+                    } else {
+                        t.secondary_text
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| {
+                            this.term_active = i;
+                            this.focus_active_terminal(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(title)
+                    .child(
+                        div()
+                            .id(("term-tab-x", i))
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|d| d.bg(t.bg_light))
+                            .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.close_terminal_tab(i, cx);
+                                }),
+                            ),
+                    ),
+            );
+        }
+        strip = strip.child(
+            div()
+                .id("term-tab-new")
+                .size(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .hover(|d| d.bg(t.bg_mid))
+                .cursor_pointer()
+                .text_color(t.secondary_text)
+                .tooltip(move |_w, cx| cx.new(|_| Tip("New terminal tab".into())).into())
+                .child("+")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, window, cx| {
+                        this.new_terminal_tab(cx);
+                        this.focus_active_terminal(window, cx);
+                        cx.notify();
+                    }),
+                ),
+        );
+
+        // The active terminal widget (entity → element).
+        let body = self
+            .term_tabs
+            .get(self.term_active)
+            .map(|v| v.clone().into_any_element())
+            .unwrap_or_else(|| div().into_any_element());
+
+        let island = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(t.main_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .overflow_hidden()
+            .child(strip)
+            .child(div().flex_1().min_h_0().child(body));
+
+        // A thin top divider whose drag resizes the panel (sets `term_resizing`).
+        let divider = div()
+            .h(px(6.0))
+            .flex_none()
+            .cursor_row_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.term_resizing = true;
+                    cx.notify();
+                }),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h(px(self.term_height))
+            // Inside the right column already (right of the full-height rail) → no left pad;
+            // aligns with the body island above it.
+            .pr(px(theme::FRAME_GAP))
+            .pb(px(theme::FRAME_GAP))
+            .bg(t.frame_bg)
+            .child(divider)
+            .child(island)
             .into_any_element()
     }
 }

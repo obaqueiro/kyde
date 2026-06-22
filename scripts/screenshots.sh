@@ -33,8 +33,36 @@ PROFILE="${PROFILE:-release}"
 mkdir -p "$CFG/kyde"
 printf '{\n  "preset": "webstorm",\n  "overrides": {}\n}\n' > "$CFG/kyde/keymap.json"
 
-cleanup() { rm -rf "$CFG_ROOT"; }
+# `region`-mode shots grab raw screen pixels in the window's rect, so the Dock OR any other
+# app window overlapping that rect (your terminal, editor, …) lands in the shot. Defend on two
+# fronts: (1) auto-hide the Dock, (2) hide every other app and bring Kyde frontmost before each
+# capture (see `focus_only_kyde`). Both are restored on exit (incl. error / Ctrl-C).
+DOCK_AUTOHIDE_WAS="$(osascript -e 'tell application "System Events" to get autohide of dock preferences' 2>/dev/null || echo true)"
+osascript -e 'tell application "System Events" to set autohide of dock preferences to true' >/dev/null 2>&1 || true
+# Apps visible right now → restore exactly these (un-hide) when we're done.
+PRIOR_VISIBLE="$(osascript -e 'tell application "System Events" to get name of (every process whose visible is true and background only is false)' 2>/dev/null || true)"
+cleanup() {
+    rm -rf "$CFG_ROOT"
+    osascript -e "tell application \"System Events\" to set autohide of dock preferences to $DOCK_AUTOHIDE_WAS" >/dev/null 2>&1 || true
+    if [ -n "${PRIOR_VISIBLE:-}" ]; then
+        local oldIFS="$IFS"; IFS=','
+        for app in $PRIOR_VISIBLE; do
+            app="${app# }" # AppleScript joins names with ", " → trim the leading space
+            osascript -e "tell application \"System Events\" to set visible of (every process whose name is \"$app\") to true" >/dev/null 2>&1 || true
+        done
+        IFS="$oldIFS"
+    fi
+}
 trap cleanup EXIT
+
+# Bring Kyde (its own pid) frontmost and hide every other foreground app, so a region grab
+# can only ever contain Kyde's windows over the empty desktop. Kyde keeps BOTH its windows
+# (main + modal) — they share the process, which stays frontmost.
+focus_only_kyde() {
+    local pid="$1"
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+    osascript -e 'tell application "System Events" to set visible of (every process whose visible is true and frontmost is false and background only is false) to false' >/dev/null 2>&1 || true
+}
 
 echo "==> building ($PROFILE)"
 if [ "$PROFILE" = release ]; then
@@ -120,7 +148,8 @@ shoot() {
         kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
         return 1
     fi
-    sleep 1  # let async layout / modal open / first paint settle
+    focus_only_kyde "$pid" # Kyde frontmost + every other app hidden → nothing else in frame
+    sleep 1  # let the hide settle + async layout / modal open / first paint settle
 
     # Fix the capture target now the window exists (window id for full-bleed; largest-window
     # rect for a modal-over-main shot). Computing it up front means the gated grab below can
@@ -180,32 +209,42 @@ shoot() {
 }
 
 # Map each README screenshot to its shot. (file ← state)
-declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback fps)
+declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback terminal fps)
 want="${1:-all}"
+
+# EVERY shot is FPS-gated: the speed pitch is the whole point, so a screenshot only counts
+# if the live on-screen reading is at the floor the instant the pixels are grabbed (the gated
+# path in `shoot` fires the grab exactly when fps ≥ MIN_FPS). If a launch never clears the
+# floor within its window, `shoot` returns non-zero and we relaunch, up to MAX_TRIES.
+MIN_FPS="${KYDE_MIN_FPS:-120}"
+MAX_TRIES="${MAX_TRIES:-20}"
+
+# shoot_until <shoot args…> — capture, retrying whole relaunches until one grabs at ≥MIN_FPS.
+shoot_until() {
+    local n=0
+    # KYDE_MIN_FPS is a *shell-env* prefix read by `shoot`, not an app arg.
+    until KYDE_MIN_FPS="$MIN_FPS" shoot "$@"; do
+        n=$((n + 1))
+        if [ "$n" -ge "$MAX_TRIES" ]; then
+            echo "    !! gave up after $n tries at ${MIN_FPS}fps — display may be capped lower"
+            return 1
+        fi
+        echo "    retry $n/$MAX_TRIES (need ≥${MIN_FPS}fps)…"
+        sleep 1
+    done
+}
 
 run_one() {
     case "$1" in
-        git-diff)         shoot git-diff         git-diff.png         window KYDE_SHOT_REPO="$DIFF_REPO" ;;
-        plugins)          shoot plugins          plugins.png          window ;;
-        plugins-window)   shoot plugins-window   plugins-window.png   region ;;
-        markdown-support) shoot markdown-support markdown-support.png window ;;
-        go-to-file)       shoot go-to-file       go-to-file.png       window ;;
-        find-in-files)    shoot find-in-files    find-in-files.png    window ;;
-        rollback)         shoot rollback         rollback.png         region ;;
-        fps)
-            # Retry until the on-screen reading is >120fps (proves the perf claim). The EMA
-            # overshoots the cap briefly on launch, so a relaunch usually catches a >120 frame.
-            local n=0
-            # KYDE_MIN_FPS is a *shell-env* prefix (read by `shoot`), not an app arg.
-            until KYDE_MIN_FPS=121 shoot fps fps.png window KYDE_SHOT_FILE="$LOCK_REL"; do
-                n=$((n + 1))
-                if [ "$n" -ge 10 ]; then
-                    echo "    !! gave up after $n tries — display may be capped at ≤120Hz"
-                    return 1
-                fi
-                sleep 1
-            done
-            ;;
+        git-diff)         shoot_until git-diff         git-diff.png         window KYDE_SHOT_REPO="$DIFF_REPO" ;;
+        plugins)          shoot_until plugins          plugins.png          window ;;
+        plugins-window)   shoot_until plugins-window   plugins-window.png   region ;;
+        markdown-support) shoot_until markdown-support markdown-support.png window ;;
+        go-to-file)       shoot_until go-to-file       go-to-file.png       window ;;
+        find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
+        rollback)         shoot_until rollback         rollback.png         region ;;
+        terminal)         shoot_until terminal         terminal.png         window ;;
+        fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         *) echo "unknown shot: $1"; exit 2 ;;
     esac
 }
