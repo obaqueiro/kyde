@@ -12,7 +12,7 @@ I don't know Rust.
 
 These days I barely open my full IDE — pre-AI I was doing thousands of commits a year, and now I mostly live in its commit and diff view, one of the few things heavy enough to make me wait for a JVM to start.
 
-So Kyde is just that. A fast native commit and diff code editor — a Git client for macOS, Linux and Windows.
+So Kyde is just that. A fast native commit and diff code editor — a Git client for macOs. (It should support Windows and Linux, I just commented out the builds since I won't actively QA and maintain these distributions).
 
 <p align="center">
   <img src="assets/screenshots/git-diff.png" alt="Commit view — side-by-side diff with word-level highlighting and a center gutter to stage/revert hunks" width="900">
@@ -116,17 +116,6 @@ Grab the latest build for your platform from the [Releases](../../releases) page
 ```sh
 xattr -dr com.apple.quarantine /Applications/Kyde.app
 ```
-
-**Linux** — download `kyde-linux.AppImage`, make it executable, and run it:
-
-```sh
-chmod +x kyde-linux.AppImage
-./kyde-linux.AppImage
-```
-
-**Windows** — download `kyde-windows.zip`, unzip, and run `kyde.exe`.
-
-Or build from source — see [Build](#build). On macOS, `./scripts/bundle-macos.sh` produces `dist/Kyde.app` you can drag to `/Applications`.
 
 ## Usage
 
