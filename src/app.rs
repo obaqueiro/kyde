@@ -729,7 +729,7 @@ impl Kyde {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { Repo::discover(&root).and_then(|r| r.push()) })
+                .spawn(async move { Repo::discover(&root).and_then(|r| r.push_rebasing()) })
                 .await;
             this.update(cx, |this, cx| {
                 this.pushing = false;

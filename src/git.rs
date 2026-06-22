@@ -243,6 +243,42 @@ impl Repo {
         }
     }
 
+    /// Push, recovering from the common "remote moved on" rejection. If the push is rejected
+    /// as non-fast-forward (e.g. CI/release automation pushed while you were working), rebase
+    /// the local commits on top of the upstream and retry once — instead of dumping git's raw
+    /// "fetch first" hint on the user. Auth/network failures pass straight through unchanged.
+    /// On a rebase conflict the rebase is aborted (clean tree restored) and a clear,
+    /// actionable error is returned.
+    pub fn push_rebasing(&self) -> Result<String> {
+        match self.push() {
+            Ok(out) => Ok(out),
+            Err(e) if push_rejected(&e.to_string()) => {
+                self.pull_rebase().map_err(|pe| {
+                    anyhow!(
+                        "remote has changes that conflict with yours — pull and resolve \
+                         them manually ({pe})"
+                    )
+                })?;
+                self.push()
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Rebase local commits onto the upstream, auto-stashing any uncommitted edits so it
+    /// works mid-change. On any failure the rebase is aborted to leave a clean working tree.
+    fn pull_rebase(&self) -> Result<String> {
+        let res = match self.current_branch() {
+            Some(b) => git(&self.root, &["pull", "--rebase", "--autostash", "origin", &b]),
+            None => git(&self.root, &["pull", "--rebase", "--autostash"]),
+        };
+        if res.is_err() {
+            // Don't strand the repo mid-rebase — restore the pre-pull state.
+            let _ = git(&self.root, &["rebase", "--abort"]);
+        }
+        res
+    }
+
     /// How many commits the current branch is ahead of its upstream. With an upstream,
     /// that's `@{u}..HEAD`. With NO upstream yet (never pushed), every commit on HEAD is
     /// unpushed, so count them all — otherwise the push button never appears for a first
@@ -386,6 +422,16 @@ fn valid_ref(name: &str) -> Result<&str> {
     Ok(n)
 }
 
+/// True when a push failed only because the remote advanced (non-fast-forward) — a
+/// rebase-and-retry can recover. Distinct from auth/network errors, which can't, so we
+/// only auto-rebase on these specific phrases git emits for a rejected push.
+fn push_rejected(err: &str) -> bool {
+    let e = err.to_lowercase();
+    ["fetch first", "non-fast-forward", "[rejected]", "updates were rejected"]
+        .iter()
+        .any(|m| e.contains(m))
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(dir)
@@ -431,6 +477,22 @@ fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_rejected_matches_only_non_fast_forward() {
+        // Real git rejection text → should trigger the rebase-and-retry recovery.
+        assert!(push_rejected(
+            "git [\"push\"] failed: ! [rejected]   main -> main (fetch first)\n\
+             error: failed to push some refs\nhint: Updates were rejected because the remote \
+             contains work that you do not have locally."
+        ));
+        assert!(push_rejected("Updates were rejected (non-fast-forward)"));
+        // Auth/network failures must NOT auto-rebase.
+        assert!(!push_rejected(
+            "fatal: Authentication failed for 'https://github.com/x/y.git'"
+        ));
+        assert!(!push_rejected("fatal: unable to access: Could not resolve host"));
+    }
 
     #[test]
     fn valid_ref_rejects_flags_and_empty() {
