@@ -46,32 +46,46 @@ impl Repo {
     /// 1 on "no matches" — we treat that (and any spawn/exit error) as an empty list,
     /// not an `Err`, so the live finder never flashes errors while you type.
     pub fn grep(&self, query: &str) -> Vec<(PathBuf, u32, String)> {
+        use std::io::{BufRead, BufReader};
         const CAP: usize = 500;
         if query.is_empty() {
             return Vec::new();
         }
-        let out = Command::new("git")
+        // Stream stdout and KILL the child once we have CAP hits. A short/common query
+        // (e.g. "e") matches almost every line in the repo — letting `git grep` run to
+        // completion buffers tens of MB and takes ~20s on a 2.7k-file repo. We only ever
+        // show CAP results, and they arrive from the first files almost immediately, so
+        // reading CAP lines then killing turns that into a near-instant, bounded read.
+        // `-m 50` also caps matches *per file* so one huge file can't fill the whole cap.
+        let child = Command::new("git")
             .current_dir(&self.root)
             .args([
                 "grep",
                 "--no-color",
-                "-F", // fixed string (not a regex)
-                "-n", // line numbers
-                "-I", // skip binary files
-                "-i", // case-insensitive
+                "-F",  // fixed string (not a regex)
+                "-n",  // line numbers
+                "-I",  // skip binary files
+                "-i",  // case-insensitive
+                "-m", "50", // max matches per file
                 "--untracked",
                 "-e",
                 query,
             ])
-            .output();
-        let Ok(out) = out else {
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else {
             return Vec::new();
         };
-        let text = String::from_utf8_lossy(&out.stdout);
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Vec::new();
+        };
         let mut hits = Vec::new();
         // Each line: `path:lineno:content`. Repo-relative paths on macOS have no ':',
         // so splitting on the first two ':' is unambiguous.
-        for line in text.lines() {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let mut it = line.splitn(3, ':');
             let (Some(path), Some(num), Some(content)) = (it.next(), it.next(), it.next()) else {
                 continue;
@@ -82,6 +96,9 @@ impl Repo {
                 break;
             }
         }
+        // Stop git scanning the rest of the repo (see note above) and reap the child.
+        let _ = child.kill();
+        let _ = child.wait();
         hits
     }
 

@@ -422,6 +422,9 @@ struct Kyde {
     /// Bumped on every diff-pane edit; the debounced autosave only fires when its captured
     /// generation still matches (so we don't spawn `git status` + re-diff per keystroke).
     diff_edit_gen: u64,
+    /// Bumped on every Find-in-Files keystroke; the debounced background `git grep` only
+    /// applies its results when its captured generation still matches (drops stale searches).
+    finder_gen: u64,
     /// FPS monitor (toggled from the Kyde menu): smoothed frames-per-second + last frame time.
     show_fps: bool,
     fps_value: f32,

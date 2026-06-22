@@ -12,6 +12,12 @@ const SCROLL_CONTEXT_ROWS: usize = 3;
 const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Debounce before a Browse edit triggers a background `git status` refresh.
 const STATUS_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+/// Debounce before a Find-in-Files keystroke fires the background `git grep` (coalesces
+/// bursts of typing — a full-repo grep is far too expensive to run per keystroke).
+const CONTENT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+/// Minimum query length before Find-in-Files runs. 1-char queries match almost every line
+/// in the repo (tens of MB of hits), so we wait until the query is specific enough.
+const CONTENT_MIN_QUERY: usize = 2;
 /// Max fuzzy-finder results rendered at once.
 const FINDER_RESULT_CAP: usize = 50;
 
@@ -161,8 +167,15 @@ impl Kyde {
         // Re-query the finder whenever its input changes.
         cx.subscribe(&finder_query, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) && this.finder_open {
-                this.recompute_finder(cx);
-                cx.notify();
+                // Find-in-Files shells out to `git grep` (expensive on large repos), so it's
+                // debounced + run on a background thread. Every other mode is an in-memory
+                // fuzzy match — cheap, run inline.
+                if this.finder_mode == FinderMode::Content {
+                    this.schedule_content_search(cx);
+                } else {
+                    this.recompute_finder(cx);
+                    cx.notify();
+                }
             }
         })
         .detach();
@@ -238,6 +251,7 @@ impl Kyde {
             find_matches: Vec::new(),
             find_idx: 0,
             diff_edit_gen: 0,
+            finder_gen: 0,
             show_fps: load_show_fps(),
             fps_value: 0.0,
             fps_last: None,
@@ -1823,6 +1837,53 @@ impl Kyde {
     }
 
     // ── finder ────────────────────────────────────────────────────
+    /// Debounced, background Find-in-Files. `git grep` on a large repo is far too expensive
+    /// to run synchronously per keystroke (a 1-char query took ~20s / 29MB on a 2.7k-file
+    /// repo and froze the UI). So: enforce a minimum query length, debounce keystroke bursts,
+    /// run the grep off the UI thread, and apply results only if no newer keystroke
+    /// superseded this one (generation check, like the diff-edit autosave).
+    fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
+        let q = self.finder_query.read(cx).text().trim().to_string();
+        self.finder_gen = self.finder_gen.wrapping_add(1);
+        let gen = self.finder_gen;
+        self.finder_selected = 0;
+        // Too short → clear immediately, never grep (matches almost every line in the repo).
+        if q.len() < CONTENT_MIN_QUERY {
+            self.content_results = Vec::new();
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CONTENT_SEARCH_DEBOUNCE).await;
+            // Superseded by a newer keystroke during the debounce window? Skip the grep.
+            if this.update(cx, |this, _| this.finder_gen).unwrap_or(gen) != gen {
+                return;
+            }
+            let hits = cx
+                .background_executor()
+                .spawn(async move { Repo::discover(&root).map(|r| r.grep(&q)).unwrap_or_default() })
+                .await;
+            this.update(cx, |this, cx| {
+                // Apply only if still the latest search and the finder's still in Content mode.
+                if this.finder_gen == gen
+                    && this.finder_open
+                    && this.finder_mode == FinderMode::Content
+                {
+                    this.content_results = hits
+                        .into_iter()
+                        .map(|(path, line, text)| ContentHit { path, line, text })
+                        .collect();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn recompute_finder(&mut self, cx: &Context<Self>) {
         let q = self.finder_query.read(cx).text().to_string();
         let matcher = SkimMatcherV2::default();
