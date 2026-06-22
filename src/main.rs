@@ -505,8 +505,14 @@ struct Kyde {
     refresh_gen: u64,
     /// Commits the current branch is ahead of its upstream (drives the push badge).
     ahead: Option<usize>,
+    /// Commits the upstream is ahead of us, last-fetch fresh (drives the pull badge).
+    behind: Option<usize>,
     /// True while a `git push` is in flight (disables the button, shows "Pushing…").
     pushing: bool,
+    /// True while a `git pull` (fetch + rebase) is in flight (shows "Pulling…").
+    pulling: bool,
+    /// True while a `git fetch` is in flight (shows "Fetching…").
+    fetching: bool,
     /// Last push error, surfaced as the push button's tooltip.
     push_msg: Option<String>,
     /// Push confirmation — its own native OS window (`None` closed).

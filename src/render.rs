@@ -3519,6 +3519,41 @@ impl Kyde {
                 cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
             );
 
+        // Pull chip: ↓ + "Pull", with a behind-of-upstream count badge. Shown only when we
+        // know we're behind (or a pull's in flight); the branch popup always offers Pull.
+        let pulling = self.pulling;
+        let behind = self.behind.unwrap_or(0);
+        let pull_btn = div()
+            .id("pull-btn")
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .gap_1p5()
+            .px_2()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_light))
+            .text_color(bar_text)
+            .tooltip(|_w, cx| cx.new(|_| Tip("Pull from origin (rebase)".into())).into())
+            .child(div().flex_none().child(if pulling { "↻" } else { "↓" }))
+            .child(SharedString::from(if pulling { "Pulling…" } else { "Pull" }))
+            .when(behind > 0, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .rounded_md()
+                        .bg(t.bg_light)
+                        .text_color(t.text)
+                        .child(SharedString::from(behind.to_string())),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
+            );
+
         div()
             .flex()
             .flex_row()
@@ -3541,6 +3576,10 @@ impl Kyde {
                     .items_center()
                     .flex_none()
                     .gap_2()
+                    // Only show Pull when we know we're behind (or one's in flight).
+                    .when(self.behind.unwrap_or(0) > 0 || self.pulling, |d| {
+                        d.child(pull_btn)
+                    })
                     // Only show Push when there's actually something to push (or one's in flight).
                     .when(self.ahead.unwrap_or(0) > 0 || self.pushing, |d| {
                         d.child(push_btn)
@@ -3603,6 +3642,30 @@ impl Kyde {
                 cx.listener(move |this, _e, _w, cx| this.open_new_branch(cx)),
             );
 
+        // Pull (fetch + rebase). Always available here — it's the repo-ops hub, and a pull
+        // fetches first, so it works even when our last-known `behind` count is stale/0.
+        let behind = self.behind.unwrap_or(0);
+        let pull_label = if self.pulling {
+            "↓ Pulling…".to_string()
+        } else if behind > 0 {
+            format!("↓ Pull  ({behind})")
+        } else {
+            "↓ Pull".to_string()
+        };
+        let pull_row = div()
+            .mx_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(t.selected_bg))
+            .text_color(t.text)
+            .child(SharedString::from(pull_label))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| this.do_pull(cx)),
+            );
+
         let search = div()
             .flex()
             .flex_row()
@@ -3632,7 +3695,8 @@ impl Kyde {
             .flex_col()
             .py_1()
             .child(new_row)
-            // hairline between New Branch and the branch tree
+            .child(pull_row)
+            // hairline between the actions and the branch tree
             .child(div().mx_2().my_1().h(px(1.0)).bg(sep))
             .children(tree_rows);
 
@@ -3807,6 +3871,16 @@ impl Kyde {
                         }),
                     ));
                 }
+                // Git remote ops, WebStorm-style (Fetch/Pull always, Push when ahead).
+                panel = panel
+                    .child(item("Fetch").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
+                    ))
+                    .child(item("Pull").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
+                    ));
                 if self.ahead.unwrap_or(0) > 0 {
                     panel = panel.child(item("Push").on_mouse_down(
                         MouseButton::Left,
@@ -3856,7 +3930,16 @@ impl Kyde {
                             }),
                         ));
                 }
-                // Push when the branch is ahead of its upstream (commits to push).
+                // Git remote ops, WebStorm-style: Fetch/Pull always, Push when ahead.
+                panel = panel
+                    .child(item("Fetch").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
+                    ))
+                    .child(item("Pull").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
+                    ));
                 if self.ahead.unwrap_or(0) > 0 {
                     panel = panel.child(item("Push").on_mouse_down(
                         MouseButton::Left,

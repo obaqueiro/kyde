@@ -296,7 +296,10 @@ impl Kyde {
             branch_expanded: std::collections::HashSet::new(),
             refresh_gen: 0,
             ahead: None,
+            behind: None,
             pushing: false,
+            pulling: false,
+            fetching: false,
             push_msg: None,
             push_win: None,
             push_files: Vec::new(),
@@ -369,6 +372,7 @@ impl Kyde {
             self.file_tree = tree::Tree::build(&self.all_files);
             self.current_branch = repo.current_branch();
             self.ahead = repo.ahead_count();
+            self.behind = repo.behind_count();
         } else if let Some(root) = self.repo_root.clone() {
             // Not a git repo: Browse is still a file tree, so populate it by walking the
             // filesystem. Git-only state (changed files, branch, ahead) stays empty, and the
@@ -739,6 +743,75 @@ impl Kyde {
                 // After refresh (which clears `op_error` on a clean status read).
                 if let Some(m) = err {
                     this.op_error = Some(format!("Push failed: {m}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pull = fetch + rebase local commits on top (auto-stashing edits), off the UI thread.
+    /// Mirrors `do_push`. Closes the branch popup so the UI never freezes mid-operation.
+    pub(crate) fn do_pull(&mut self, cx: &mut Context<Self>) {
+        self.branch_popup_open = false;
+        self.context_menu = None;
+        if self.pulling {
+            return;
+        }
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        self.pulling = true;
+        self.push_msg = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { Repo::discover(&root).and_then(|r| r.pull_rebase()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.pulling = false;
+                let err = result.err().map(|e| e.to_string());
+                this.push_msg = err.clone();
+                this.refresh();
+                // After refresh (which clears `op_error` on a clean status read).
+                if let Some(m) = err {
+                    this.op_error = Some(format!("Pull failed: {m}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetch remote-tracking refs off the UI thread, then refresh so the ahead/behind badges
+    /// reflect the true remote state. Doesn't touch the working tree (unlike Pull).
+    pub(crate) fn do_fetch(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.branch_popup_open = false;
+        if self.fetching {
+            return;
+        }
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        self.fetching = true;
+        self.push_msg = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { Repo::discover(&root).and_then(|r| r.fetch()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.fetching = false;
+                let err = result.err().map(|e| e.to_string());
+                // refresh() recomputes ahead/behind from the freshly-fetched refs.
+                this.refresh();
+                if let Some(m) = err {
+                    this.op_error = Some(format!("Fetch failed: {m}"));
                 }
                 cx.notify();
             })

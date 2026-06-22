@@ -265,9 +265,28 @@ impl Repo {
         }
     }
 
+    /// Fetch remote-tracking refs (with prune) without touching the working tree. Run before
+    /// reading `ahead_count`/`behind_count` to make them reflect the true remote state.
+    pub fn fetch(&self) -> Result<String> {
+        git(&self.root, &["fetch", "--prune"])
+    }
+
+    /// Commits the upstream is ahead of the current branch — i.e. how many a pull would
+    /// bring in. Reflects the last-fetched remote-tracking ref (so it's only as fresh as the
+    /// last fetch/pull). `None` when there's no upstream or HEAD is unborn.
+    pub fn behind_count(&self) -> Option<usize> {
+        git(&self.root, &["rev-parse", "@{u}"]).ok()?;
+        git(&self.root, &["rev-list", "--count", "HEAD..@{u}"])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
     /// Rebase local commits onto the upstream, auto-stashing any uncommitted edits so it
     /// works mid-change. On any failure the rebase is aborted to leave a clean working tree.
-    fn pull_rebase(&self) -> Result<String> {
+    /// Public so it doubles as the explicit "Pull" action (a pull fetches, then rebases).
+    pub fn pull_rebase(&self) -> Result<String> {
         let res = match self.current_branch() {
             Some(b) => git(&self.root, &["pull", "--rebase", "--autostash", "origin", &b]),
             None => git(&self.root, &["pull", "--rebase", "--autostash"]),
