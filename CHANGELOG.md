@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [0.2.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.1.1...kyde-v0.2.0) (2026-06-22)
+
+
+### Features
+
+* Kyde - A fast native commit and diff code editor ([28038bc](https://github.com/kyle-ssg/kyde/commit/28038bccef15f3d81da4b5e18e26d5c8f5fa2e89))
+* release signing secret names and notarize via Apple ID ([9b402ee](https://github.com/kyle-ssg/kyde/commit/9b402eee75c4e782637a8ee49cbc4dd0028628c7))
+
 ## [0.1.1](https://github.com/kyle-ssg/kyde/compare/kyde-v0.1.0...kyde-v0.1.1) (2026-06-21)
 
 
