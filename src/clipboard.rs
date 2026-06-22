@@ -123,8 +123,8 @@ mod tests {
     #[test]
     fn decodes_local_file_urls() {
         assert_eq!(
-            file_url_to_path("file:///Users/kyle/My%20File.txt"),
-            Some(PathBuf::from("/Users/kyle/My File.txt"))
+            file_url_to_path("file:///Users/me/My%20File.txt"),
+            Some(PathBuf::from("/Users/me/My File.txt"))
         );
         // Host segment (rare) is skipped; path starts at the first slash after it.
         assert_eq!(

@@ -55,9 +55,13 @@ A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.jso
 * **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace.
 * **Editor tabs** that scroll and follow the active file.
 * **Image preview** for PNG/JPG/GIF/WebP.
-* **Syntax highlighting** via tree-sitter, opt-in [language packs](#build) (TS/TSX, JS, Rust, JSON, Markdown, Shell, CSS/SCSS, YAML, TOML, Python, HTML, Go, `.env`, `.gitignore`).
+* **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
 * **Code folding** for grammar-backed languages.
 * **Markdown preview** — a live rendered pane alongside the editor.
+
+<p align="center">
+  <img src="assets/screenshots/plugins-window.png" alt="Language Plugins manager — a native window listing every language pack (CSS, Go, HTML, JavaScript, JSON, LaTeX, Markdown, Python, R, …) with per-pack Install / Uninstall" width="900">
+</p>
 
 <p align="center">
   <img src="assets/screenshots/plugins.png" alt="Browse view — folder tree, editor tabs, and an opt-in language-pack install banner" width="900">
@@ -126,13 +130,18 @@ Or build from source — see [Build](#build). On macOS, `./scripts/bundle-macos.
 
 ## Usage
 
-`ky` (my alias in `~/.zshrc`) opens the Projects view, or:
+Launch with no arguments for the Projects view, or point it at a repo:
 
 ```sh
 cargo run -- /path/to/repo
 ```
 
-opens a project directly.
+First-run setup offers to **install a `ky` shell command** (a symlink into `~/.local/bin` — no shell-rc editing, no `sudo`); leave it ticked and you can open Kyde from any terminal:
+
+```sh
+ky                 # Projects view
+ky /path/to/repo   # open a repo directly
+```
 
 Default shortcuts (WebStorm → VSCode):
 

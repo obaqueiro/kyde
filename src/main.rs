@@ -1335,6 +1335,12 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             set_packs(view, &[]);
             view.open_file(PathBuf::from("src/main.rs"), cx);
         }
+        // The Language Plugins native modal window (lists every language pack with toggles).
+        // A few installed so both on/off states show.
+        "plugins-window" => {
+            set_packs(view, &["rust", "json", "markdown", "typescript"]);
+            view.act_open_plugins(&OpenPlugins, window, cx);
+        }
         // Browse a Markdown file with the pack installed → live rendered preview pane.
         "markdown-support" => {
             set_packs(view, &["markdown"]);
