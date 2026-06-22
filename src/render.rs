@@ -3537,7 +3537,11 @@ impl Kyde {
             .text_color(bar_text)
             .tooltip(|_w, cx| cx.new(|_| Tip("Pull from origin (rebase)".into())).into())
             .child(div().flex_none().child(if pulling { "↻" } else { "↓" }))
-            .child(SharedString::from(if pulling { "Pulling…" } else { "Pull" }))
+            .child(SharedString::from(if pulling {
+                "Pulling…"
+            } else {
+                "Pull"
+            }))
             .when(behind > 0, |d| {
                 d.child(
                     div()

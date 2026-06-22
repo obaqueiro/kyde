@@ -62,11 +62,12 @@ impl Repo {
             .args([
                 "grep",
                 "--no-color",
-                "-F",  // fixed string (not a regex)
-                "-n",  // line numbers
-                "-I",  // skip binary files
-                "-i",  // case-insensitive
-                "-m", "50", // max matches per file
+                "-F", // fixed string (not a regex)
+                "-n", // line numbers
+                "-I", // skip binary files
+                "-i", // case-insensitive
+                "-m",
+                "50", // max matches per file
                 "--untracked",
                 "-e",
                 query,
@@ -288,7 +289,10 @@ impl Repo {
     /// Public so it doubles as the explicit "Pull" action (a pull fetches, then rebases).
     pub fn pull_rebase(&self) -> Result<String> {
         let res = match self.current_branch() {
-            Some(b) => git(&self.root, &["pull", "--rebase", "--autostash", "origin", &b]),
+            Some(b) => git(
+                &self.root,
+                &["pull", "--rebase", "--autostash", "origin", &b],
+            ),
             None => git(&self.root, &["pull", "--rebase", "--autostash"]),
         };
         if res.is_err() {
@@ -446,9 +450,14 @@ fn valid_ref(name: &str) -> Result<&str> {
 /// only auto-rebase on these specific phrases git emits for a rejected push.
 fn push_rejected(err: &str) -> bool {
     let e = err.to_lowercase();
-    ["fetch first", "non-fast-forward", "[rejected]", "updates were rejected"]
-        .iter()
-        .any(|m| e.contains(m))
+    [
+        "fetch first",
+        "non-fast-forward",
+        "[rejected]",
+        "updates were rejected",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -510,7 +519,9 @@ mod tests {
         assert!(!push_rejected(
             "fatal: Authentication failed for 'https://github.com/x/y.git'"
         ));
-        assert!(!push_rejected("fatal: unable to access: Could not resolve host"));
+        assert!(!push_rejected(
+            "fatal: unable to access: Could not resolve host"
+        ));
     }
 
     #[test]

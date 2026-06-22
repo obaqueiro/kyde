@@ -1930,14 +1930,20 @@ impl Kyde {
             return;
         };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CONTENT_SEARCH_DEBOUNCE).await;
+            cx.background_executor()
+                .timer(CONTENT_SEARCH_DEBOUNCE)
+                .await;
             // Superseded by a newer keystroke during the debounce window? Skip the grep.
             if this.update(cx, |this, _| this.finder_gen).unwrap_or(gen) != gen {
                 return;
             }
             let hits = cx
                 .background_executor()
-                .spawn(async move { Repo::discover(&root).map(|r| r.grep(&q)).unwrap_or_default() })
+                .spawn(async move {
+                    Repo::discover(&root)
+                        .map(|r| r.grep(&q))
+                        .unwrap_or_default()
+                })
                 .await;
             this.update(cx, |this, cx| {
                 // Apply only if still the latest search and the finder's still in Content mode.
