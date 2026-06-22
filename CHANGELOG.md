@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [0.3.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.2.0...kyde-v0.3.0) (2026-06-22)
+
+
+### Features
+
+* pull and fetch ([5f91eab](https://github.com/kyle-ssg/kyde/commit/5f91eabb22675386e5d35102600a86c34c89a1dd))
+
+
+### Bug Fixes
+
+* auto recover git pushes ([945d3eb](https://github.com/kyle-ssg/kyde/commit/945d3eb85200f4a7f7dd20f6552b400bde67356d))
+* fmt ([47b61c7](https://github.com/kyle-ssg/kyde/commit/47b61c7e46b51924be83f04a48b11dc97a3afc37))
+* prevent UI freeze on Find in Files in large repos ([07d1528](https://github.com/kyle-ssg/kyde/commit/07d1528d38f7691962439af81821cc7ce917beef))
+
 ## [0.2.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.1.1...kyde-v0.2.0) (2026-06-22)
 
 
