@@ -346,8 +346,8 @@ pub(crate) enum SbView {
     MdEditor,
     MdPreview,
     Diff,
+    /// The diff's single shared horizontal scrollbar.
     DiffLeftH,
-    DiffRightH,
 }
 
 /// An open "name this file" prompt (the small modal with a text input).
@@ -412,6 +412,10 @@ struct Kyde {
     old_spans: Vec<highlight::Span>,
     new_spans: Vec<highlight::Span>,
     commit_editor: Entity<CodeEditor>,
+    /// Set by `enter_commit`; `render_commit` consumes it to focus the commit-message input
+    /// on the next frame (deferred so the editor element is in the tree first), so opening the
+    /// Commit view drops the caret straight into the message box.
+    focus_commit_msg: bool,
     /// Side-by-side diff editors: left = base (read-only), right = working (editable,
     /// live-saves). `diff_path` is the file they're showing.
     diff_left: Entity<CodeEditor>,
@@ -427,12 +431,10 @@ struct Kyde {
     /// Base (HEAD/index) text of the diffed file, kept so we can re-diff live as the
     /// right (working) pane is edited without re-reading git each keystroke.
     diff_base: String,
-    /// Shared scroll handle → the two diff panes scroll together (VERTICALLY).
+    /// Shared 2D scroll for BOTH diff panes (single element each → gpui axis-locks the wheel,
+    /// so a vertical gesture doesn't drift horizontally; both panes track it → aligned in both
+    /// axes, horizontal scroll shared across the side-by-side).
     diff_scroll: ScrollHandle,
-    /// Per-pane HORIZONTAL scroll (independent left/right, since their longest lines differ).
-    /// Nested inside the shared vertical scroll so rows stay aligned but long lines scroll.
-    diff_left_hscroll: ScrollHandle,
-    diff_right_hscroll: ScrollHandle,
     /// Left pane's fraction of the diff island width (the draggable center divider sets it).
     diff_split: f32,
     /// True while dragging the center divider to resize the two diff panes.
@@ -468,6 +470,9 @@ struct Kyde {
     tree_width: f32,
     /// True when the file tree is minimized to a thin strip (the `−` button).
     tree_collapsed: bool,
+    /// True when the commit view's changed-files panel is minimized to a thin strip (its `−`
+    /// button), giving the side-by-side diff the full width. Independent of `tree_collapsed`.
+    commit_collapsed: bool,
     /// True while the user is dragging the tree/editor divider.
     tree_resizing: bool,
     /// Cursor-x minus the divider edge at drag start, so the first mouse-move doesn't jolt

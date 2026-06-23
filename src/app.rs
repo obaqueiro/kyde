@@ -216,6 +216,7 @@ impl Kyde {
             repo_root: root,
             mode: Mode::Browse, // code-first: a freshly opened project shows the editor
             focus_handle: cx.focus_handle(),
+            focus_commit_msg: false,
             keymap,
             plugins: Plugins::load(),
             ignored_packs: std::collections::HashSet::new(),
@@ -239,8 +240,6 @@ impl Kyde {
             diff_readonly: false,
             diff_base: String::new(),
             diff_scroll: ScrollHandle::new(),
-            diff_left_hscroll: ScrollHandle::new(),
-            diff_right_hscroll: ScrollHandle::new(),
             diff_split: 0.5,
             diff_pane_resizing: false,
             file_scroll: ScrollHandle::new(),
@@ -258,6 +257,7 @@ impl Kyde {
             expanded: std::collections::HashSet::from([PathBuf::new()]),
             tree_width: 320.0,
             tree_collapsed: false,
+            commit_collapsed: false,
             tree_resizing: false,
             tree_drag_offset: 0.0,
             diff_drag_offset: 0.0,
@@ -789,6 +789,8 @@ impl Kyde {
         self.git_tab = tab;
         match tab {
             GitTab::Commit => {
+                // Switching onto the Commit tab focuses the message box, same as entering it.
+                self.focus_commit_msg = true;
                 if self.files.is_empty() {
                     self.clear_diff_panes(cx);
                 } else {
@@ -2866,6 +2868,9 @@ impl Kyde {
     /// load the selected file into the diff editors.
     pub(crate) fn enter_commit(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Commit;
+        // Drop the caret into the commit-message box on the next frame (render_commit consumes
+        // this once the input element is in the tree).
+        self.focus_commit_msg = true;
         if let Some(repo) = self.repo() {
             self.files = repo.status().unwrap_or_default();
             self.push_base = repo.push_base();

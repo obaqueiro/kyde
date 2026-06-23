@@ -795,10 +795,18 @@ impl Kyde {
         };
         // Tab bar (Commit / Push), then the active tab's left column + shared diff pane.
         let tabs = self.render_git_tabs(active, cx);
-        let left = match active {
-            GitTab::Commit => self.render_commit_left(ui, cx),
-            GitTab::Push => self.render_push_left(ui, cx),
-        };
+        // The Commit tab's files panel can be minimised to a thin strip (the `−` button in its
+        // header), handing the full width to the side-by-side diff.
+        let collapsed = active == GitTab::Commit && self.commit_collapsed;
+        // Auto-focus the commit-message box when the Commit view opens (deferred so the input
+        // element is in the tree first). Only when its tab is active and not collapsed — the
+        // box isn't rendered otherwise.
+        if self.focus_commit_msg && active == GitTab::Commit && !collapsed {
+            self.focus_commit_msg = false;
+            let handle = self.commit_editor.read(cx).focus_handle.clone();
+            window.focus(&handle);
+            window.defer(cx, move |window, _cx| window.focus(&handle));
+        }
         let divider = div()
             .id("commit-divider")
             .w(px(theme::FRAME_GAP))
@@ -813,20 +821,63 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let body = div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h_0()
-            .child(left)
-            .child(divider)
-            .child(self.render_diff(ui, fs, Some(window), cx));
+        // `min_w_0` is essential: without it the diff island (flex_1) sizes to its wide editor
+        // content instead of the remaining row width, and the last flex child (the right diff
+        // pane) collapses to zero — the side-by-side then shows only the base. History's diff
+        // works because its container already sets `min_w_0`.
+        let mut body = div().flex().flex_row().flex_1().min_h_0().min_w_0();
+        if collapsed {
+            // Thin strip with a `»` expand button where the files panel was (same affordance as
+            // the Browse tree's collapsed strip). No resize divider — nothing to resize.
+            body = body.child(
+                div()
+                    .flex_none()
+                    .h_full()
+                    .w(px(30.0))
+                    .py_1()
+                    .bg(t.panel_bg)
+                    .rounded(px(theme::ISLAND_RADIUS))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("commit-expand")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded_md()
+                            .text_size(px(15.0))
+                            .text_color(t.line_number)
+                            .hover(|s| s.bg(t.bg_light).text_color(t.text))
+                            .cursor_pointer()
+                            .tooltip(|_w, cx| cx.new(|_| Tip("Expand files panel".into())).into())
+                            .child("»")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _e, _w, cx| {
+                                    this.commit_collapsed = false;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
+        } else {
+            let left = match active {
+                GitTab::Commit => self.render_commit_left(ui, cx),
+                GitTab::Push => self.render_push_left(ui, cx),
+            };
+            body = body.child(left).child(divider);
+        }
+        let body = body.child(self.render_diff(ui, fs, Some(window), cx));
 
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .child(tabs)
             .child(body)
             .into_any_element()
@@ -972,12 +1023,40 @@ impl Kyde {
             .collect();
         // File-list island (same island styling/width as the Browse tree): a fixed search
         // header (filter box + divider) over the scrollable changed-files list.
+        // Header: filter box + a `−` button that minimises the panel to a thin strip (same
+        // affordance as the Browse tree), handing the full width to the side-by-side diff.
+        let collapse_btn = div()
+            .id("commit-minimize")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(22.0))
+            .rounded_md()
+            .text_size(px(16.0))
+            .text_color(t.line_number)
+            .hover(|s| s.bg(t.bg_light).text_color(t.text))
+            .cursor_pointer()
+            .tooltip(|_w, cx| cx.new(|_| Tip("Collapse files panel".into())).into())
+            .child("−")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.commit_collapsed = true;
+                    cx.notify();
+                }),
+            );
         let search_header = div()
             .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
             .px_2()
             .py_1p5()
             .text_size(px(theme::get().ui_font_size))
-            .child(self.commit_search.clone());
+            .child(div().flex_1().min_w_0().child(self.commit_search.clone()))
+            .child(collapse_btn);
         let search_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
         let file_list = div()
             .id("commit-tree")
@@ -1127,7 +1206,9 @@ impl Kyde {
         let push_btn = btn_primary("push", if pushing { "Pushing…" } else { "Push" })
             .py_2()
             .font_weight(FontWeight::SEMIBOLD)
-            .when(pushing, |d| d.opacity(0.6).cursor_default())
+            .when(pushing, |d| {
+                d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.do_push(cx)),
@@ -1544,16 +1625,31 @@ impl Kyde {
             .text_size(px(t.ui_font_size))
             .child(self.history_files_query.clone());
         let files_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
-        let files_tree = div()
-            .id("hist-files")
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .px_1()
-            .py_1()
-            .children(file_rows);
+        // No changed files (e.g. "Compare with Local" when the working tree matches the
+        // commit) → an explicit empty-state instead of a lone, childless root folder row.
+        let files_body = if self.history_files.is_empty() {
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .text_color(t.line_number)
+                .child("No changes")
+                .into_any_element()
+        } else {
+            div()
+                .id("hist-files")
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .px_1()
+                .py_1()
+                .children(file_rows)
+                .into_any_element()
+        };
         let files_wrap = div()
             .flex_1()
             .min_w_0()
@@ -1564,7 +1660,7 @@ impl Kyde {
             .text_size(px(t.ui_font_size + 1.0))
             .child(files_search)
             .child(files_hr)
-            .child(files_tree);
+            .child(files_body);
 
         // Flat 1px dividers between sections (IntelliJ-style), not frame-gap islands.
         let hdiv = || div().h(px(3.0)).flex_none().bg(t.bg_light);
@@ -1947,53 +2043,34 @@ impl Kyde {
         let frac = self.diff_split.clamp(0.15, 0.85);
         let lw = self.diff_left.read(cx).content_width();
         let rw = self.diff_right.read(cx).content_width();
-        let pane_scroll = |id: &'static str,
-                           hid: &'static str,
-                           vh: &ScrollHandle,
-                           hh: &ScrollHandle,
-                           w: f32,
-                           editor: gpui::AnyElement| {
-            div()
-                .id(id)
-                .h_full()
-                .w_full()
-                .overflow_y_scroll()
-                .track_scroll(vh)
-                .child(
-                    div()
-                        .id(hid)
-                        .overflow_x_scroll()
-                        .track_scroll(hh)
-                        .child(div().w(px(w)).child(editor)),
-                )
-        };
+        let pane_scroll =
+            |id: &'static str, scroll: &ScrollHandle, w: f32, editor: gpui::AnyElement| {
+                div()
+                    .id(id)
+                    .h_full()
+                    .w_full()
+                    .overflow_scroll()
+                    .track_scroll(scroll)
+                    .child(div().w(px(w)).child(editor))
+            };
         let left_inner = pane_scroll(
             "diff-left-scroll",
-            "diff-left-h",
             &self.diff_scroll,
-            &self.diff_left_hscroll,
             lw,
             self.diff_left.clone().into_any_element(),
         );
         let right_inner = pane_scroll(
             "diff-right-scroll",
-            "diff-right-h",
             &self.diff_scroll,
-            &self.diff_right_hscroll,
             rw,
             self.diff_right.clone().into_any_element(),
         );
-        let lh_bar = self.diff_hscrollbar(
-            &self.diff_left_hscroll.clone(),
-            lw,
+        // One shared horizontal scrollbar driven by `diff_scroll`; its travel is the wider
+        // pane's content. Placed on the island (full width) below.
+        let h_bar = self.diff_hscrollbar(
+            &self.diff_scroll.clone(),
+            lw.max(rw),
             SbView::DiffLeftH,
-            window.as_deref_mut(),
-            cx,
-        );
-        let rh_bar = self.diff_hscrollbar(
-            &self.diff_right_hscroll.clone(),
-            rw,
-            SbView::DiffRightH,
             window.as_deref_mut(),
             cx,
         );
@@ -2004,25 +2081,14 @@ impl Kyde {
         let left_empty = self.diff_left.read(cx).text().is_empty();
         let right_empty = self.diff_right.read(cx).text().is_empty();
         if left_empty != right_empty {
-            let (inner, hbar) = if left_empty {
-                (right_inner, rh_bar)
-            } else {
-                (left_inner, lh_bar)
-            };
+            let inner = if left_empty { right_inner } else { left_inner };
             let scrollbar = self.diff_vscrollbar(total_h, window.as_deref_mut(), cx);
             return island()
                 .relative()
                 .flex()
                 .flex_row()
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .child(inner)
-                        .children(hbar),
-                )
+                .child(div().relative().flex_1().min_w_0().h_full().child(inner))
+                .children(h_bar)
                 .children(scrollbar)
                 .into_any_element();
         }
@@ -2033,16 +2099,14 @@ impl Kyde {
             .flex_shrink()
             .min_w_0()
             .h_full()
-            .child(left_inner)
-            .children(lh_bar);
+            .child(left_inner);
         let right = div()
             .relative()
             .flex_basis(gpui::relative(1.0 - frac))
             .flex_shrink()
             .min_w_0()
             .h_full()
-            .child(right_inner)
-            .children(rh_bar);
+            .child(right_inner);
         // The gutter (chevrons) shares the editors' vertical scroll by translating its content
         // by the SAME offset; it also doubles as the draggable divider (drag to resize the
         // split). Clicks on a `»` still revert their hunk (chevrons are children).
@@ -2098,6 +2162,7 @@ impl Kyde {
             .child(left)
             .child(gutter)
             .child(right)
+            .children(h_bar)
             .children(scrollbar)
             .into_any_element()
     }
@@ -2295,7 +2360,11 @@ impl Kyde {
         )
         .py_2()
         .font_weight(FontWeight::SEMIBOLD)
-        .when(committing, |d| d.opacity(0.6).cursor_default())
+        // Pin hover opacity too — btn_primary's built-in `hover(opacity 0.9)` would otherwise
+        // undo the dimmed/disabled look the moment you hover.
+        .when(committing, |d| {
+            d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| {
@@ -5345,7 +5414,9 @@ impl Kyde {
             .child(
                 btn_primary("push", if self.pushing { "Pushing…" } else { "Push" })
                     .py_1p5()
-                    .when(self.pushing, |d| d.opacity(0.6).cursor_default())
+                    .when(self.pushing, |d| {
+                        d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.do_push(cx)),
