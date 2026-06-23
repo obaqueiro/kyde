@@ -339,6 +339,7 @@ impl Kyde {
             history_files_expanded: std::collections::HashSet::new(),
             history_files_query,
             history_panel_h: 320.0,
+            history_panel_collapsed: false,
             history_v_resizing: false,
             history_v_drag_offset: 0.0,
             history_compare: CompareMode::Local,

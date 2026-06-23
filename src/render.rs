@@ -1064,7 +1064,52 @@ impl Kyde {
                     .text_size(px(t.ui_font_size))
                     .child(self.history_commit_query.clone()),
             )
-            .child(compare_chip);
+            .child(compare_chip)
+            // Minimise / expand the bottom panel (IDE tool-window style).
+            .child({
+                let collapsed = self.history_panel_collapsed;
+                div()
+                    .id("hist-panel-toggle")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(28.0))
+                    .rounded_md()
+                    .text_size(px(16.0))
+                    .cursor_pointer()
+                    .text_color(t.line_number)
+                    .hover(|d| d.bg(t.bg_mid).text_color(t.text))
+                    .tooltip(move |_w, cx| {
+                        let tip = if collapsed {
+                            "Expand panel"
+                        } else {
+                            "Minimise panel"
+                        };
+                        cx.new(|_| Tip(tip.into())).into()
+                    })
+                    // `−` to minimise (same as the Browse tree's collapse button); to expand,
+                    // the tree's `»` double-chevron rotated to point up (this panel grows
+                    // upward) = Lucide `chevrons-up`.
+                    .child(if collapsed {
+                        // svg() does NOT inherit the parent div's text color — set it here, or
+                        // the icon draws with no stroke (invisible).
+                        svg()
+                            .path("icons/chevrons-up.svg")
+                            .size(px(16.0))
+                            .text_color(t.line_number)
+                            .into_any_element()
+                    } else {
+                        SharedString::from("−").into_any_element()
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.history_panel_collapsed = !this.history_panel_collapsed;
+                            cx.notify();
+                        }),
+                    )
+            });
 
         // ── commit list (filtered by the commit search box) ──
         let cq = self
@@ -1201,6 +1246,14 @@ impl Kyde {
                         }))
             });
         }
+        // Root row shows the project name (like the Browse tree), not a generic "Files".
+        let root_name: SharedString = self
+            .repo_root
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string())
+            .into();
         let file_rows: Vec<gpui::AnyElement> = visible
             .into_iter()
             .map(|r| {
@@ -1214,7 +1267,7 @@ impl Kyde {
                     .map(|f| status_color(f.status))
                     .unwrap_or(t.text);
                 let name: SharedString = if is_root {
-                    "Files".into()
+                    root_name.clone()
                 } else {
                     r.path
                         .file_name()
@@ -1301,19 +1354,24 @@ impl Kyde {
             );
 
         // Bottom panel (one island): toolbar, then commit list | files, divider-split.
-        // Height is drag-resizable via the strip above it (`history_panel_h`).
+        // Height is drag-resizable via the strip above it (`history_panel_h`). The header
+        // chevron minimises it to just the toolbar (`history_panel_collapsed`).
         let panel_h = self.history_panel_h;
-        let bottom = div()
+        let collapsed = self.history_panel_collapsed;
+        // Toolbar height: pt + 28px chip row + pb. Used to anchor the dropdowns + as the
+        // panel height when minimised.
+        let header_h = theme::FRAME_GAP * 2.0 + 28.0;
+        let panel_visible_h = if collapsed { header_h } else { panel_h };
+        let mut bottom = div()
             .flex()
             .flex_col()
             .flex_none()
-            .h(px(panel_h))
             .bg(t.main_bg)
             .rounded(px(theme::ISLAND_RADIUS))
             .overflow_hidden()
-            .child(header)
-            .child(hdiv())
-            .child(
+            .child(header);
+        if !collapsed {
+            bottom = bottom.h(px(panel_h)).child(hdiv()).child(
                 div()
                     .flex()
                     .flex_row()
@@ -1324,6 +1382,7 @@ impl Kyde {
                     .child(split_divider)
                     .child(files_wrap),
             );
+        }
 
         // Drag strip between the diff (top) and the log panel (bottom) — resizes the panel.
         let v_divider = div()
@@ -1345,7 +1404,8 @@ impl Kyde {
                 }),
             );
 
-        // Top = diff (main), divider, bottom = the log panel.
+        // Top = diff (main), divider, bottom = the log panel. The resize strip is dropped
+        // when the panel is minimised (nothing to resize).
         let mut root = div()
             .relative()
             .flex()
@@ -1353,9 +1413,11 @@ impl Kyde {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(self.render_diff(ui, fs, Some(window), cx))
-            .child(v_divider)
-            .child(bottom);
+            .child(self.render_diff(ui, fs, Some(window), cx));
+        if !collapsed {
+            root = root.child(v_divider);
+        }
+        root = root.child(bottom);
 
         // Branch dropdown: a search box over Local / Remote sections, anchored ABOVE the
         // bottom-panel toolbar (it grows up over the diff so it isn't clipped by the panel).
@@ -1413,7 +1475,7 @@ impl Kyde {
                 .id("hist-rev-list")
                 .absolute()
                 // Anchor just above the bottom panel's toolbar; grows upward over the diff.
-                .bottom(px(panel_h + 2.0))
+                .bottom(px(panel_visible_h + 2.0))
                 .left(px(2.0))
                 .flex()
                 .flex_col()
@@ -1471,7 +1533,7 @@ impl Kyde {
             let mut menu = div()
                 .id("hist-compare-list")
                 .absolute()
-                .bottom(px(panel_h + 2.0))
+                .bottom(px(panel_visible_h + 2.0))
                 .right(px(2.0))
                 .flex()
                 .flex_col()

@@ -612,6 +612,9 @@ struct Kyde {
     history_files_query: Entity<CodeEditor>,
     /// Height (px) of the history bottom panel (drag the top edge to resize).
     history_panel_h: f32,
+    /// When true the history bottom panel is minimised to just its toolbar (the header
+    /// chevron toggles it), giving the diff the full height.
+    history_panel_collapsed: bool,
     /// True while dragging the history panel's top (vertical) divider.
     history_v_resizing: bool,
     /// Cursor-to-divider gap captured at drag start, so the panel doesn't jolt to the
@@ -1260,6 +1263,7 @@ impl gpui::AssetSource for Assets {
             "icons/check.svg" => include_bytes!("../assets/icons/check.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron-down.svg" => include_bytes!("../assets/icons/chevron-down.svg"),
+            "icons/chevrons-up.svg" => include_bytes!("../assets/icons/chevrons-up.svg"),
             "logo.png" => include_bytes!("../assets/logo.png"),
             _ => return Ok(None),
         };
