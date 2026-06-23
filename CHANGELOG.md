@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [1.1.0](https://github.com/kyle-ssg/kyde/compare/kyde-v1.0.0...kyde-v1.1.0) (2026-06-23)
+
+
+### Features
+
+* Add collapse feature to Git history ([1ecb421](https://github.com/kyle-ssg/kyde/commit/1ecb421fe6f8c54943915675564e5ebdd8cd2471))
+* add commit and push tabs ([01202c4](https://github.com/kyle-ssg/kyde/commit/01202c4aff68ed1230984cc5880b3cbbd1e924e7))
+* git history ([0b8d7b1](https://github.com/kyle-ssg/kyde/commit/0b8d7b1ab5326a4c2ab35eb4596d44d82ffd4e8e))
+* Git History ([f691824](https://github.com/kyle-ssg/kyde/commit/f691824db4d326ca992f6d54952a0938ffbf8de3))
+* self-update ([f394b5a](https://github.com/kyle-ssg/kyde/commit/f394b5ade94cb23829a47bbc7de0bc4aa7b3f078))
+* self-update ([35d84e3](https://github.com/kyle-ssg/kyde/commit/35d84e30f738020dba436e104e117ad27370b553))
+
+
+### Bug Fixes
+
+* new branch upstrea ([c38f729](https://github.com/kyle-ssg/kyde/commit/c38f7294e7609207550c0e165d1d0282bc39aa9c))
+* new branch upstrea ([53b84d6](https://github.com/kyle-ssg/kyde/commit/53b84d653b6c77e2158ccace532e4d31a6303c14))
+
 ## [1.0.0](https://github.com/kyle-ssg/kyde/compare/kyde-v0.3.0...kyde-v1.0.0) (2026-06-22)
 
 
