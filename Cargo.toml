@@ -1,6 +1,6 @@
 [package]
 name = "kyde"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
 license = "Apache-2.0"
