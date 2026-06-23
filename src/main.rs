@@ -25,6 +25,7 @@ mod shellcmd;
 mod terminal;
 mod theme;
 mod tree;
+mod update;
 
 use diff::{FileDiff, HunkKind};
 use editor::{CodeEditor, EditorEvent};
@@ -603,6 +604,12 @@ struct Kyde {
     git_tab: GitTab,
     /// Selected file index in the Push tab's list (drives its read-only diff).
     push_selected: Option<usize>,
+
+    // Self-update
+    /// A newer release found on GitHub (drives the update banner); `None` = up to date / unknown.
+    update_available: Option<update::Release>,
+    /// True while a download-swap is in flight (disables the button, shows progress).
+    updating: bool,
 
     // History (git log) view
     /// Revision being logged — a branch name, or "HEAD" for the current branch.
