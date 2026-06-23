@@ -60,7 +60,8 @@ actions!(
         EscapeKey,
         ToggleTerminal,
         NewTerminalTab,
-        ClearTerminal
+        ClearTerminal,
+        DeleteFile
     ]
 );
 // File-finder navigation (fixed keys, context "FileFinder").
@@ -136,6 +137,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "new_scratch", NewScratch);
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
+    // Backspace: delete the selected Browse-tree file/folder (fixed key). Bound to the
+    // "Kyde" context, NOT globally, so the deeper editor/commit-box/terminal Backspace
+    // bindings win whenever one of those is focused — this only fires at the app root.
+    cx.bind_keys([KeyBinding::new("backspace", DeleteFile, Some("Kyde"))]);
     // Standard quit shortcut (not user-configurable).
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
     // Toggle the bottom terminal panel (fixed key, IDE-standard); ⌘T = new tab while the
@@ -588,6 +593,8 @@ struct Kyde {
     behind: Option<usize>,
     /// True while a `git push` is in flight (disables the button, shows "Pushing…").
     pushing: bool,
+    /// True while a `git commit` is in flight (disables the button, shows "Committing…").
+    committing: bool,
     /// True while a `git pull` (fetch + rebase) is in flight (shows "Pulling…").
     pulling: bool,
     /// True while a `git fetch` is in flight (shows "Fetching…").
@@ -1320,6 +1327,18 @@ impl gpui::AssetSource for Assets {
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron-down.svg" => include_bytes!("../assets/icons/chevron-down.svg"),
             "icons/chevrons-up.svg" => include_bytes!("../assets/icons/chevrons-up.svg"),
+            // Context-menu action icons.
+            "icons/git-commit.svg" => include_bytes!("../assets/icons/git-commit.svg"),
+            "icons/rotate-ccw.svg" => include_bytes!("../assets/icons/rotate-ccw.svg"),
+            "icons/arrow-down-to-line.svg" => {
+                include_bytes!("../assets/icons/arrow-down-to-line.svg")
+            }
+            "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
+            "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
+            "icons/file-plus.svg" => include_bytes!("../assets/icons/file-plus.svg"),
+            "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
+            "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
+            "icons/x.svg" => include_bytes!("../assets/icons/x.svg"),
             "logo.png" => include_bytes!("../assets/logo.png"),
             _ => return Ok(None),
         };

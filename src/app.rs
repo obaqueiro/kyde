@@ -323,6 +323,7 @@ impl Kyde {
             ahead: None,
             behind: None,
             pushing: false,
+            committing: false,
             pulling: false,
             fetching: false,
             push_msg: None,
@@ -757,7 +758,10 @@ impl Kyde {
             // Recent expanded by default; Local collapsed.
             self.branch_expanded.insert("sec:recent".into());
             self.branch_popup_open = true;
-            window.focus(&self.branch_query.read(cx).focus_handle.clone());
+            // Focus now and next frame: the popup element isn't in the tree on first open.
+            let handle = self.branch_query.read(cx).focus_handle.clone();
+            window.focus(&handle);
+            window.defer(cx, move |window, _cx| window.focus(&handle));
         }
         cx.notify();
     }
@@ -1673,31 +1677,55 @@ impl Kyde {
     }
 
     pub(crate) fn commit_now(&mut self, cx: &mut Context<Self>) {
+        if self.committing {
+            return;
+        }
         let msg = self.commit_editor.read(cx).text().trim().to_string();
         if msg.is_empty() || self.commit_checked.is_empty() {
             return;
         }
-        if let Some(repo) = self.repo() {
-            // Stage exactly the checked files; unstage everything else so the commit
-            // contains precisely what's ticked.
-            for f in &self.files {
-                if self.commit_checked.contains(&f.path) {
-                    let _ = repo.stage(&f.path);
-                } else {
-                    let _ = repo.unstage(&f.path);
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        // Snapshot what to stage vs unstage so the actual git work runs off the UI thread
+        // (staging + commit shell out per file — keep the button responsive + show feedback).
+        let checked: Vec<PathBuf> = self.commit_checked.iter().cloned().collect();
+        let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
+        self.committing = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let repo = Repo::discover(&root)?;
+                    for p in &all {
+                        if checked.contains(p) {
+                            repo.stage(p)?;
+                        } else {
+                            repo.unstage(p)?;
+                        }
+                    }
+                    repo.commit(&msg)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.committing = false;
+                match result {
+                    Ok(()) => {
+                        this.commit_editor.update(cx, |e, cx| {
+                            e.set_content(String::new(), Lang::PlainText, cx)
+                        });
+                        this.refresh();
+                        // Tab may be empty now → flip to Push if it has work.
+                        this.normalize_git_tab(cx);
+                    }
+                    Err(e) => this.fail("Commit", e),
                 }
-            }
-            if let Err(e) = repo.commit(&msg) {
-                self.fail("Commit", e);
-                return;
-            }
-        }
-        self.commit_editor.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
-        });
-        self.refresh();
-        // Committed everything → the Commit tab may be empty now; flip to Push if it has work.
-        self.normalize_git_tab(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Expand/collapse a directory in the Browse tree.
@@ -2396,6 +2424,23 @@ impl Kyde {
         window.focus(&self.focus_handle);
         cx.notify();
     }
+    /// Backspace: delete the selected Browse-tree file/folder — identical to the
+    /// right-click "Delete…" menu item (both route through `open_delete`, which pops the
+    /// confirm modal). Browse mode only; no-op when nothing is selected.
+    pub(crate) fn act_delete_file(
+        &mut self,
+        _: &DeleteFile,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != Mode::Browse {
+            return;
+        }
+        if let Some(path) = self.selected_path.clone() {
+            self.open_delete(path, cx);
+        }
+    }
+
     pub(crate) fn act_find(&mut self, _: &FindInFile, window: &mut Window, cx: &mut Context<Self>) {
         self.open_find(false, window, cx);
     }
@@ -3103,10 +3148,15 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Move focus to the active terminal tab's widget.
+    /// Move focus to the active terminal tab's widget. Focus now AND next frame via
+    /// `window.defer`: on first open the tab was just spawned this frame, so its
+    /// `TerminalElement` isn't in the window tree yet and an immediate-only focus
+    /// wouldn't stick (same gotcha as the finder/branch-popup focus).
     pub(crate) fn focus_active_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.term_tabs.get(self.term_active) {
-            window.focus(&view.read(cx).handle());
+            let handle = view.read(cx).handle();
+            window.focus(&handle);
+            window.defer(cx, move |window, _cx| window.focus(&handle));
         }
     }
 }

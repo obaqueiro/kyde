@@ -125,11 +125,7 @@ A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.jso
 
 Grab the latest build for your platform from the [Releases](../../releases) page.
 
-**macOS** — download `kyde-macos.zip`, unzip, and drag **Kyde.app** to `/Applications`. The app isn't code-signed yet, so the first launch is blocked by Gatekeeper — right-click it and choose **Open** (once), or clear the quarantine flag:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/Kyde.app
-```
+**macOS** — download `kyde-macos.zip` (Apple Silicon) or `kyde-macos-x86_64.zip` (Intel), unzip, and drag **Kyde.app** to `/Applications`.
 
 ## Usage
 

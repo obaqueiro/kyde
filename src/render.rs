@@ -262,6 +262,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_find_in_files))
             .on_action(cx.listener(Self::act_actions))
             .on_action(cx.listener(Self::act_new_scratch))
+            .on_action(cx.listener(Self::act_delete_file))
             .on_action(cx.listener(Self::act_save))
             .on_action(cx.listener(Self::act_commit))
             .on_action(cx.listener(Self::act_mode_commit))
@@ -1122,9 +1123,11 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let push_btn = btn_primary("push", "Push")
+        let pushing = self.pushing;
+        let push_btn = btn_primary("push", if pushing { "Pushing…" } else { "Push" })
             .py_2()
             .font_weight(FontWeight::SEMIBOLD)
+            .when(pushing, |d| d.opacity(0.6).cursor_default())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.do_push(cx)),
@@ -1194,7 +1197,10 @@ impl Kyde {
                 cx.listener(|this, _e, window, cx| {
                     this.toggle_history_branches(cx);
                     if this.history_branch_open {
-                        window.focus(&this.history_branch_query.read(cx).focus_handle.clone());
+                        // Focus now and next frame: the dropdown isn't in the tree on first open.
+                        let handle = this.history_branch_query.read(cx).focus_handle.clone();
+                        window.focus(&handle);
+                        window.defer(cx, move |window, _cx| window.focus(&handle));
                     }
                 }),
             );
@@ -2276,17 +2282,27 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        // Emphasized primary CTA: standard primary button + taller pad + semibold.
-        let commit_btn = btn_primary("commit", "Commit")
-            .py_2()
-            .font_weight(FontWeight::SEMIBOLD)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    this.commit_now(cx);
-                    cx.notify();
-                }),
-            );
+        // Emphasized primary CTA: standard primary button + taller pad + semibold. While a
+        // commit is in flight it's dimmed + labelled "Committing…" (clicks are no-ops).
+        let committing = self.committing;
+        let commit_btn = btn_primary(
+            "commit",
+            if committing {
+                "Committing…"
+            } else {
+                "Commit"
+            },
+        )
+        .py_2()
+        .font_weight(FontWeight::SEMIBOLD)
+        .when(committing, |d| d.opacity(0.6).cursor_default())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| {
+                this.commit_now(cx);
+                cx.notify();
+            }),
+        );
 
         div()
             .flex()
@@ -2793,9 +2809,13 @@ impl Kyde {
                     name,
                     name_color,
                     None,
-                    move |this, e, _w, cx| {
+                    move |this, e, window, cx| {
                         // Single click selects; double click opens. Folders toggle expansion.
                         this.selected_path = Some(p_act.clone());
+                        // Focus the app root so the "Kyde"-context Backspace (delete) binding
+                        // is live on the selected row. (Double-click open_file re-focuses the
+                        // editor below, which is what we want there.)
+                        window.focus(&this.focus_handle);
                         if is_dir {
                             this.toggle_dir(p_act.clone(), cx);
                         } else if e.click_count >= 2 {
@@ -4909,14 +4929,29 @@ impl Kyde {
         };
         let t = theme::get();
         // Owned-label menu row (for runtime-built labels); `item` is the &'static convenience.
+        // Each row gets a leading icon picked from its label (a fixed-width slot so labels with
+        // no icon still align). Strips a trailing "✓ " / "…" when matching.
         let item_owned = |label: SharedString| {
+            let icon = menu_icon(&label);
+            let slot = div().flex_none().size(px(16.0)).flex().items_center();
+            let slot = match icon {
+                Some(path) => {
+                    slot.child(svg().path(path).size(px(15.0)).text_color(t.secondary_text))
+                }
+                None => slot,
+            };
             div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
                 .px_3()
                 .py_1()
                 // Default arrow cursor over menu rows (don't inherit the editor's I-beam).
                 .cursor(gpui::CursorStyle::Arrow)
                 .text_color(t.text)
                 .hover(|s| s.bg(t.selected_bg))
+                .child(slot)
                 .child(label)
         };
         let item = |label: &'static str| item_owned(SharedString::from(label));
@@ -5156,12 +5191,15 @@ impl Kyde {
             }
         };
 
-        // Backdrop: any click (incl. right elsewhere) dismisses the menu.
+        // Backdrop: any click (incl. right elsewhere) dismisses the menu. `occlude()` makes it
+        // absorb ALL mouse events (incl. hover/move), so hovering the menu — or anywhere over
+        // the backdrop — doesn't bleed through to the rows painted behind it.
         div()
             .absolute()
             .top_0()
             .left_0()
             .size_full()
+            .occlude()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.close_menu(cx)),
@@ -5304,10 +5342,15 @@ impl Kyde {
                         }),
                     ),
             )
-            .child(btn_primary("push", "Push").py_1p5().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.do_push(cx)),
-            ));
+            .child(
+                btn_primary("push", if self.pushing { "Pushing…" } else { "Push" })
+                    .py_1p5()
+                    .when(self.pushing, |d| d.opacity(0.6).cursor_default())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_push(cx)),
+                    ),
+            );
 
         let mut panel = div()
             .size_full()
@@ -6080,6 +6123,29 @@ fn btn_secondary(
         .cursor_pointer()
         .hover(|s| s.bg(t.bg_mid))
         .child(label.into())
+}
+
+/// Icon path for a context-menu row, keyed off its label (so call sites stay `item("…")`).
+/// Tolerates a leading "✓ " (compare modes) and a trailing "…". `None` → no icon (e.g. tab
+/// file-name rows), which still reserves the icon slot so labels line up.
+fn menu_icon(label: &str) -> Option<&'static str> {
+    let l = label.trim_start_matches("✓ ").trim_end_matches('…').trim();
+    Some(match l {
+        "Commit" => "icons/git-commit.svg",
+        "Rollback" => "icons/rotate-ccw.svg",
+        "Fetch" => "icons/arrow-down-to-line.svg",
+        "Pull" => "icons/arrow-down.svg",
+        "Push" => "icons/arrow-up.svg",
+        "New File" => "icons/file-plus.svg",
+        "Rename" => "icons/pencil.svg",
+        "Delete" => "icons/trash.svg",
+        "Git History" => "icons/history.svg",
+        "Reveal in Finder" => "icons/folder.svg",
+        "View Diff" | "Show Diff" => "icons/file-lines.svg",
+        _ if l.starts_with("Close") => "icons/x.svg",
+        _ if l.starts_with("Compare") => "icons/git-branch.svg",
+        _ => return None,
+    })
 }
 
 /// One pill of a tab strip (e.g. the git view's Commit/Push tabs), IntelliJ-style: active =

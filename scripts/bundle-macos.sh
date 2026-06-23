@@ -39,6 +39,18 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 
+# ProMotion (120Hz adaptive refresh) only exists on Apple-Silicon Macs, and macOS only
+# unlocks it for apps whose declared era is >= macOS 12 (Monterey, the first ProMotion
+# release). A lower LSMinimumSystemVersion tags the app as pre-ProMotion → AppKit clamps
+# CVDisplayLink to 60Hz. So: arm64 build floors at 12.0 (gets 120Hz); the Intel build
+# (no ProMotion hardware anyway) keeps the broad 10.15 floor.
+ARCH="${TARGET%%-*}"            # aarch64 / x86_64 from the target triple
+[ -z "$ARCH" ] && ARCH="$(uname -m)"   # local build (no TARGET) → host arch (arm64/x86_64)
+case "$ARCH" in
+  aarch64|arm64) MINVER="12.0" ;;
+  *)             MINVER="10.15" ;;
+esac
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,7 +65,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>      <string>kyde</string>
   <key>CFBundleIconFile</key>        <string>AppIcon</string>
   <key>NSHighResolutionCapable</key> <true/>
-  <key>LSMinimumSystemVersion</key>  <string>10.15</string>
+  <key>LSMinimumSystemVersion</key>  <string>${MINVER}</string>
 </dict>
 </plist>
 PLIST
