@@ -762,8 +762,10 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        // Nothing changed → no tree/diff, just a centered message.
-        if self.files.is_empty() {
+        let commit_n = self.files.len();
+        let push_n = self.push_files.len();
+        // Nothing to commit AND nothing to push → a single centered message.
+        if commit_n == 0 && push_n == 0 {
             return div()
                 .flex()
                 .flex_1()
@@ -775,9 +777,107 @@ impl Kyde {
                 .font_family(ui)
                 .text_size(px(theme::get().ui_font_size + 1.0))
                 .text_color(t.line_number)
-                .child("No changes detected")
+                .child("You have nothing to commit or push")
                 .into_any_element();
         }
+
+        // Only tabs with content are shown; fall back to the available one if the selected
+        // tab is the empty one (state is normalised after commit/push, this is a display guard).
+        let active = match self.git_tab {
+            GitTab::Commit if commit_n == 0 => GitTab::Push,
+            GitTab::Push if push_n == 0 => GitTab::Commit,
+            other => other,
+        };
+        // Tab bar (Commit / Push), then the active tab's left column + shared diff pane.
+        let tabs = self.render_git_tabs(active, cx);
+        let left = match active {
+            GitTab::Commit => self.render_commit_left(ui, cx),
+            GitTab::Push => self.render_push_left(ui, cx),
+        };
+        let divider = div()
+            .id("commit-divider")
+            .w(px(theme::FRAME_GAP))
+            .h_full()
+            .flex_none()
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
+                    this.tree_resizing = true;
+                    this.tree_drag_offset = f32::from(e.position.x) - RAIL_W - this.tree_width;
+                    cx.notify();
+                }),
+            );
+        let body = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .child(left)
+            .child(divider)
+            .child(self.render_diff(ui, fs, Some(window), cx));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(tabs)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Tab strip atop the git view: Commit (working changes) and Push (committed-but-unpushed),
+    /// each with a count badge when non-empty.
+    fn render_git_tabs(&self, active: GitTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let ui = theme::font::UI_FAMILY;
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .px_1()
+            .pb(px(theme::FRAME_GAP))
+            .font_family(ui)
+            .text_size(px(t.ui_font_size));
+        // A tab is shown only when it has files (reusable pill component, IntelliJ-style).
+        if !self.files.is_empty() {
+            row = row.child(
+                tab_pill(
+                    "git-tab-commit",
+                    "Commit",
+                    self.files.len(),
+                    active == GitTab::Commit,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.set_git_tab(GitTab::Commit, cx)),
+                ),
+            );
+        }
+        if !self.push_files.is_empty() {
+            row = row.child(
+                tab_pill(
+                    "git-tab-push",
+                    "Push",
+                    self.push_files.len(),
+                    active == GitTab::Push,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.set_git_tab(GitTab::Push, cx)),
+                ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// Left column of the Commit tab: the changed-files tree (search + checkboxes) + the
+    /// commit-message bar.
+    fn render_commit_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
         let root_name = self
             .repo_root
             .as_ref()
@@ -899,7 +999,7 @@ impl Kyde {
             .child(file_list);
 
         // Left column: file list + commit message, the same width as the Browse tree.
-        let left = div()
+        div()
             .flex()
             .flex_col()
             .gap(px(theme::FRAME_GAP))
@@ -907,31 +1007,146 @@ impl Kyde {
             .flex_none()
             .h_full()
             .child(list_island)
-            .child(self.render_commit_bar(cx));
+            .child(self.render_commit_bar(cx))
+            .into_any_element()
+    }
 
-        let divider = div()
-            .id("commit-divider")
-            .w(px(theme::FRAME_GAP))
-            .h_full()
+    /// Left column of the Push tab: a flat list of the files a push would send (click → diff)
+    /// + a footer with the Push button. No checkboxes — a push is all-or-nothing.
+    fn render_push_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let n = self.push_files.len();
+        let rows: Vec<gpui::AnyElement> = self
+            .push_files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let selected = self.push_selected == Some(i);
+                let name: SharedString = f
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| f.path.to_string_lossy().into_owned())
+                    .into();
+                let dir = f
+                    .path
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|s| !s.is_empty());
+                let name_color = status_color(f.status);
+                let path = f.path.clone();
+                div()
+                    .id(("push-file", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .mx(px(6.0))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(t.selected_bg))
+                    .when(!selected, |d| d.hover(|s| s.bg(t.bg_mid)))
+                    .child(div().flex_none().child(badge_inner(file_badge(&path), 2.0)))
+                    .child(div().flex_none().text_color(name_color).child(name))
+                    .when_some(dir, |d, dir| {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(t.line_number)
+                                .child(SharedString::from(dir)),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| this.select_push_file(i, cx)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let count_header = div()
             .flex_none()
-            .cursor_col_resize()
+            .px_3()
+            .py_1p5()
+            .text_color(t.line_number)
+            .child(SharedString::from(if n == 0 {
+                "Nothing to push".to_string()
+            } else {
+                format!("{n} file{} to push", if n == 1 { "" } else { "s" })
+            }));
+        let list = div()
+            .id("push-list")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .py_1()
+            .children(rows);
+        let list_island = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .bg(t.panel_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .text_color(t.text)
+            .font_family(ui)
+            .text_size(px(theme::get().ui_font_size + 1.0))
+            .child(count_header)
+            .child(div().flex_none().h(px(1.0)).mx_1().bg(t.divider))
+            .child(list);
+
+        // Footer bar: Cancel (back to Browse) + Push, styled like the commit bar's buttons.
+        let cancel_btn = div()
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(t.divider)
+            .text_color(t.secondary_text)
+            .cursor_pointer()
+            .child("Cancel")
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
-                    this.tree_resizing = true;
-                    this.tree_drag_offset = f32::from(e.position.x) - RAIL_W - this.tree_width;
+                cx.listener(|this, _e, _w, cx| {
+                    this.mode = Mode::Browse;
                     cx.notify();
                 }),
             );
+        let push_btn = btn_primary("push", "Push")
+            .py_2()
+            .font_weight(FontWeight::SEMIBOLD)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.do_push(cx)),
+            );
+        let bar = div()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap_2()
+            .flex_none()
+            .p_2()
+            .bg(t.panel_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .font_family(ui)
+            .child(cancel_btn)
+            .when(n > 0, |d| d.child(push_btn));
 
         div()
             .flex()
-            .flex_row()
-            .flex_1()
-            .min_h_0()
-            .child(left)
-            .child(divider)
-            .child(self.render_diff(ui, fs, Some(window), cx))
+            .flex_col()
+            .gap(px(theme::FRAME_GAP))
+            .w(px(self.tree_width))
+            .flex_none()
+            .h_full()
+            .child(list_island)
+            .child(bar)
             .into_any_element()
     }
 
@@ -1183,6 +1398,13 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| this.select_history_commit(i, cx)),
+                    )
+                    // Right-click → the same compare options as the header dropdown.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                            this.open_menu(e.position, MenuTarget::HistoryCompare(i), cx)
+                        }),
                     )
                     .into_any_element()
             })
@@ -4607,7 +4829,8 @@ impl Kyde {
             return div().into_any_element();
         };
         let t = theme::get();
-        let item = |label: &'static str| {
+        // Owned-label menu row (for runtime-built labels); `item` is the &'static convenience.
+        let item_owned = |label: SharedString| {
             div()
                 .px_3()
                 .py_1()
@@ -4617,6 +4840,7 @@ impl Kyde {
                 .hover(|s| s.bg(t.selected_bg))
                 .child(label)
         };
+        let item = |label: &'static str| item_owned(SharedString::from(label));
 
         let mut panel = div()
             .cursor(gpui::CursorStyle::Arrow)
@@ -4829,6 +5053,25 @@ impl Kyde {
                                 }),
                             ),
                     );
+                }
+                panel
+            }
+            // Same compare options as the header dropdown, applied to the right-clicked commit.
+            MenuTarget::HistoryCompare(idx) => {
+                let idx = *idx;
+                let cur = self.history_compare;
+                for mode in CompareMode::ALL {
+                    let label = if mode == cur {
+                        SharedString::from(format!("✓ {}", mode.label()))
+                    } else {
+                        SharedString::from(mode.label())
+                    };
+                    panel = panel.child(item_owned(label).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.history_compare_commit(idx, mode, cx)
+                        }),
+                    ));
                 }
                 panel
             }
@@ -5758,6 +6001,55 @@ fn btn_secondary(
         .cursor_pointer()
         .hover(|s| s.bg(t.bg_mid))
         .child(label.into())
+}
+
+/// One pill of a tab strip (e.g. the git view's Commit/Push tabs), IntelliJ-style: active =
+/// subtle filled bg + faint border; inactive = transparent with a hover bg. A `count` badge
+/// shows when > 0 (accent-filled on the active tab). Caller chains `.on_mouse_down(...)`.
+fn tab_pill(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    count: usize,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    let mut d = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(active, |d| {
+            d.bg(t.bg_light)
+                .border_1()
+                .border_color(t.divider)
+                .text_color(t.text)
+        })
+        .when(!active, |d| {
+            d.text_color(t.line_number).hover(|d| d.bg(t.bg_mid))
+        })
+        .child(label.into());
+    if count > 0 {
+        d = d.child(
+            div()
+                .flex_none()
+                .px(px(5.0))
+                .rounded_sm()
+                .bg(if active { t.primary } else { t.bg_light })
+                .text_size(px(10.0))
+                .text_color(if active {
+                    t.primary_text
+                } else {
+                    t.secondary_text
+                })
+                .child(SharedString::from(count.to_string())),
+        );
+    }
+    d
 }
 
 /// Standard **primary** button (accent fill + primary text). Caller chains `.on_mouse_down`.

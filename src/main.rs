@@ -177,6 +177,13 @@ enum Mode {
 
 /// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
 /// changed), `Latest` = vs HEAD, `Local` = vs the working tree.
+/// The two tabs of the git (Commit) view: staging working changes vs pushing committed ones.
+#[derive(Clone, Copy, PartialEq)]
+enum GitTab {
+    Commit,
+    Push,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CompareMode {
     /// This commit vs its parent — what the commit changed (read-only).
@@ -301,6 +308,9 @@ enum MenuTarget {
     Tab(usize),
     /// The tab-bar overflow chooser (`▾`): a flat list of every open tab to jump to.
     TabList,
+    /// A commit row in the History list (by index into `history_commits`) — its menu offers
+    /// the same compare modes as the header dropdown.
+    HistoryCompare(usize),
 }
 
 struct ContextMenu {
@@ -589,6 +599,10 @@ struct Kyde {
     push_files: Vec<ChangedFile>,
     /// Base revision those files are diffed against (`@{u}` or the empty tree).
     push_base: String,
+    /// Which tab the git (Commit) view is showing — staging changes or pushing commits.
+    git_tab: GitTab,
+    /// Selected file index in the Push tab's list (drives its read-only diff).
+    push_selected: Option<usize>,
 
     // History (git log) view
     /// Revision being logged — a branch name, or "HEAD" for the current branch.

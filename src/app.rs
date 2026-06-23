@@ -329,6 +329,8 @@ impl Kyde {
             push_win: None,
             push_files: Vec::new(),
             push_base: String::new(),
+            git_tab: GitTab::Commit,
+            push_selected: None,
             history_rev: "HEAD".to_string(),
             history_path: None,
             history_commits: Vec::new(),
@@ -431,11 +433,15 @@ impl Kyde {
             self.current_branch = repo.current_branch();
             self.ahead = repo.ahead_count();
             self.behind = repo.behind_count();
+            // What a push would send — kept live so the Push tab's count badge is accurate.
+            self.push_base = repo.push_base();
+            self.push_files = repo.push_files();
         } else if let Some(root) = self.repo_root.clone() {
             // Not a git repo: Browse is still a file tree, so populate it by walking the
             // filesystem. Git-only state (changed files, branch, ahead) stays empty, and the
             // commit/push/rollback flows simply have nothing to act on.
             self.files.clear();
+            self.push_files.clear();
             self.current_branch = None;
             self.ahead = None;
             self.op_error = None;
@@ -697,6 +703,8 @@ impl Kyde {
                 }
             }
         }
+        // An external change may have emptied the active git tab — keep it valid.
+        self.normalize_git_tab(cx);
         cx.notify();
     }
 
@@ -747,6 +755,85 @@ impl Kyde {
             self.push_files.clear();
         }
         self.open_modal_window(ModalKind::Push, "Push", 520.0, 560.0, cx);
+        cx.notify();
+    }
+
+    /// Switch the git view's tab (Commit / Push), selecting the first file of that tab so
+    /// its diff shows right away.
+    pub(crate) fn set_git_tab(&mut self, tab: GitTab, cx: &mut Context<Self>) {
+        if self.git_tab == tab {
+            return;
+        }
+        self.git_tab = tab;
+        match tab {
+            GitTab::Commit => {
+                if self.files.is_empty() {
+                    self.clear_diff_panes(cx);
+                } else {
+                    let i = self.selected.filter(|&i| i < self.files.len()).unwrap_or(0);
+                    self.select_with(i, Some(cx));
+                }
+            }
+            GitTab::Push => {
+                if self.push_files.is_empty() {
+                    self.push_selected = None;
+                    self.clear_diff_panes(cx);
+                } else {
+                    let i = self
+                        .push_selected
+                        .filter(|&i| i < self.push_files.len())
+                        .unwrap_or(0);
+                    self.select_push_file(i, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Keep `git_tab` on a tab that has content: if the current tab just emptied (after a
+    /// commit or push), switch to the other one and select its first file. No-op when the
+    /// current tab still has files, or when both are empty (the view shows its central message).
+    pub(crate) fn normalize_git_tab(&mut self, cx: &mut Context<Self>) {
+        if self.mode != Mode::Commit {
+            return;
+        }
+        let want = match self.git_tab {
+            GitTab::Commit if self.files.is_empty() && !self.push_files.is_empty() => GitTab::Push,
+            GitTab::Push if self.push_files.is_empty() && !self.files.is_empty() => GitTab::Commit,
+            _ => return,
+        };
+        self.set_git_tab(want, cx);
+    }
+
+    /// Empty the diff panes (both sides + cached diff/path) — used when a tab has no file to
+    /// show, so a stale file doesn't linger from the other tab.
+    fn clear_diff_panes(&mut self, cx: &mut Context<Self>) {
+        self.diff_path = None;
+        self.current_diff = None;
+        self.diff_left.update(cx, |e, cx| {
+            e.set_content(String::new(), Lang::PlainText, cx)
+        });
+        self.diff_right.update(cx, |e, cx| {
+            e.set_content(String::new(), Lang::PlainText, cx)
+        });
+    }
+
+    /// Select a file in the Push tab → load its committed change (`push_base` vs HEAD)
+    /// read-only into the diff panes (no working-tree edit, so no revert chevrons/autosave).
+    pub(crate) fn select_push_file(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.push_selected = Some(idx);
+        let Some(file) = self.push_files.get(idx).cloned() else {
+            return;
+        };
+        let Some(repo) = self.repo() else { return };
+        let before = repo
+            .committed_content(&self.push_base, &file.path)
+            .unwrap_or_default();
+        let after = repo
+            .committed_content("HEAD", &file.path)
+            .unwrap_or_default();
+        let lang = self.effective_lang(&file.path);
+        self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);
         cx.notify();
     }
 
@@ -802,6 +889,8 @@ impl Kyde {
                 if let Some(m) = err {
                     this.op_error = Some(format!("Push failed: {m}"));
                 }
+                // Pushed → the Push tab may be empty now; flip to Commit if it has work.
+                this.normalize_git_tab(cx);
                 cx.notify();
             })
             .ok();
@@ -1496,6 +1585,8 @@ impl Kyde {
             e.set_content(String::new(), Lang::PlainText, cx)
         });
         self.refresh();
+        // Committed everything → the Commit tab may be empty now; flip to Push if it has work.
+        self.normalize_git_tab(cx);
     }
 
     /// Expand/collapse a directory in the Browse tree.
@@ -2621,6 +2712,22 @@ impl Kyde {
         self.mode = Mode::Commit;
         if let Some(repo) = self.repo() {
             self.files = repo.status().unwrap_or_default();
+            self.push_base = repo.push_base();
+            self.push_files = repo.push_files();
+        }
+        // Default to the tab that has work: Push if there's nothing to commit but commits
+        // are waiting to be pushed; Commit otherwise.
+        self.git_tab = if self.files.is_empty() && !self.push_files.is_empty() {
+            GitTab::Push
+        } else {
+            GitTab::Commit
+        };
+        // On the Push tab, select the first push file so its diff shows immediately.
+        if self.git_tab == GitTab::Push {
+            self.rebuild_commit_view(true);
+            self.select_push_file(0, cx);
+            cx.notify();
+            return;
         }
         self.rebuild_commit_view(true);
         // Prefer the currently-open file, else the prior selection, else the first change.
@@ -2761,6 +2868,19 @@ impl Kyde {
         } else {
             self.select_history_file(0, cx);
         }
+    }
+
+    /// Right-click a commit → pick a compare mode for it: select that commit, then apply the
+    /// mode (mirrors the header dropdown, which acts on the selected commit).
+    pub(crate) fn history_compare_commit(
+        &mut self,
+        idx: usize,
+        mode: CompareMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        self.history_selected = Some(idx);
+        self.set_history_compare(mode, cx);
     }
 
     /// Change the compare mode (vs parent / latest / local) → refresh files + diff.
