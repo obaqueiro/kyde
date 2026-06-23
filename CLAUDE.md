@@ -87,6 +87,30 @@ file. Key colors and accents:
 - `status_*`, `diff_*_bg`, `syn_*` round out the palette. `syn_identifier`/`syn_operator`
   set to `#D1D3D9` so general code text matches the general text color.
 
+## History view (git log — `render_history` + app.rs `history_*` + git.rs `log`/`diff_files`)
+Third rail mode (`Mode::History`, `icons/history.svg`), reached by the rail clock icon →
+`enter_history`. Three panes: **commit list** (left, `Repo::log(rev, 300)` → `git::Commit`
+rows showing subject, decoration refs, `short · author · relative-date`), the selected
+commit's **changed files** (middle), and a **read-only side-by-side diff** (right, reuses
+`render_diff` + `load_diff_panes(readonly=true)`). State on `Kyde`: `history_rev`,
+`history_commits`, `history_selected`, `history_files`, `history_file_selected`,
+`history_compare`, `history_branch_open`, `history_scroll`.
+- **Branch picker**: the `⎇ <rev>` chip toggles `history_branch_open` → a dropdown with a
+  **search box** (`history_branch_query`, live-filters) over **LOCAL** (`Repo::branches()`)
+  and **REMOTE** (`Repo::remote_branches()`, `refs/remotes/`) sections plus a "HEAD" entry;
+  picking one → `set_history_rev` re-logs. Defaults to the current branch.
+- **Path scope**: right-clicking a folder/file in the Browse tree → **Git History** calls
+  `enter_history_for(path)`, which logs only commits touching that subtree (recursive for a
+  folder) — `Repo::log`/`diff_files` take an `Option<&Path>` pathspec. A `▸ <path>` scope
+  chip in the header clears it (back to whole-repo) on click. `history_path` holds the scope.
+- **Compare modes** (`CompareMode`, segmented control top-right): `Before` = commit vs its
+  parent (`<hash>^`), `Latest` = vs `HEAD`, `Local` = vs the working tree. `history_revs`
+  maps the mode to `(from, to)` (to `None` = working tree); `select_history_commit` →
+  `Repo::diff_files(from, to)` for the file list; `select_history_file` loads each side via
+  `committed_content`/`working_content`.
+- git.rs additions: `Commit` struct, `log`, generalized `diff_files(from, to: Option<&str>)`
+  (shared by `push_files`), and the `parse_name_status` helper.
+
 ## Terminal panel (src/terminal.rs — `terminal` Cargo feature)
 A real PTY-backed VTE terminal, bottom-docked with multi-tab support. **Gated behind the
 `terminal` Cargo feature** (in `default`): off → the module + alacritty's ~2MB of `.rodata`

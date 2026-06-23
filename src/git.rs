@@ -21,6 +21,19 @@ pub struct ChangedFile {
     pub status: FileStatus,
 }
 
+/// One entry in the git log (history view).
+#[derive(Debug, Clone)]
+pub struct Commit {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    /// Relative date string (`git log --date=relative`), e.g. "2 hours ago".
+    pub date: String,
+    pub subject: String,
+    /// Decoration refs (`%D`): e.g. "HEAD -> main, origin/main, tag: v1". Empty if none.
+    pub refs: String,
+}
+
 pub struct Repo {
     root: PathBuf,
 }
@@ -333,33 +346,69 @@ impl Repo {
     /// Files that differ between `push_base()` and HEAD — i.e. what a push would send.
     /// Same `ChangedFile` shape as `status()`, so the push modal renders like commit/rollback.
     pub fn push_files(&self) -> Vec<ChangedFile> {
-        let base = self.push_base();
-        let raw = match git(&self.root, &["diff", "--name-status", "-z", &base, "HEAD"]) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
+        self.diff_files(&self.push_base(), Some("HEAD"), None)
+    }
+
+    /// Files that differ between two revisions. `to == None` diffs `from` against the working
+    /// tree (so the history view can compare a commit to the local checkout); `path` (a dir
+    /// or file) scopes the diff to that subtree, recursively. Same `ChangedFile` shape as
+    /// `status()`/`push_files()`. Empty on any error (bad rev, etc.).
+    pub fn diff_files(
+        &self,
+        from: &str,
+        to: Option<&str>,
+        path: Option<&Path>,
+    ) -> Vec<ChangedFile> {
+        let Ok(from) = valid_ref(from) else {
+            return Vec::new();
         };
-        let mut files = Vec::new();
-        // `-z`: NUL-separated fields. Status field, then path; renames/copies emit the
-        // status (e.g. "R100") followed by TWO paths (old, new) — keep the new one.
-        let mut parts = raw.split('\0').filter(|s| !s.is_empty());
-        while let Some(stat) = parts.next() {
-            let code = stat.as_bytes().first().copied().unwrap_or(b'M') as char;
-            let path = if code == 'R' || code == 'C' {
-                let _old = parts.next();
-                parts.next()
-            } else {
-                parts.next()
+        let mut args = vec!["diff", "--name-status", "-z", from];
+        if let Some(to) = to {
+            let Ok(to) = valid_ref(to) else {
+                return Vec::new();
             };
-            let Some(path) = path else { break };
-            // name-status gives a single column; map it via the index-column slot.
-            let status = classify(code, ' ');
-            files.push(ChangedFile {
-                path: PathBuf::from(path),
-                status,
-            });
+            args.push(to);
         }
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        files
+        let path_str = path.map(|p| p.to_string_lossy().into_owned());
+        if let Some(p) = &path_str {
+            args.push("--");
+            args.push(p);
+        }
+        match git(&self.root, &args) {
+            Ok(raw) => parse_name_status(&raw),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Commit log for a revision (branch name or `HEAD`), newest first, capped at `limit`.
+    /// `path` (a dir or file) restricts the log to commits that touched that subtree —
+    /// recursive for a directory — so the history view can scope to a folder.
+    pub fn log(&self, rev: &str, limit: usize, path: Option<&Path>) -> Result<Vec<Commit>> {
+        let rev = valid_ref(rev)?;
+        // \x1f (unit separator) between fields; one commit per line (%s/%D are single-line).
+        let fmt = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D";
+        let n = format!("-n{}", limit);
+        let mut args = vec!["log", rev, "--date=relative", &n, fmt];
+        let path_str = path.map(|p| p.to_string_lossy().into_owned());
+        if let Some(p) = &path_str {
+            args.push("--");
+            args.push(p);
+        }
+        let raw = git(&self.root, &args)?;
+        Ok(raw
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split('\u{1f}');
+                Some(Commit {
+                    hash: f.next()?.to_string(),
+                    short: f.next()?.to_string(),
+                    author: f.next()?.to_string(),
+                    date: f.next()?.to_string(),
+                    subject: f.next()?.to_string(),
+                    refs: f.next().unwrap_or("").trim().to_string(),
+                })
+            })
+            .collect())
     }
 
     /// Content of `rel` at a committed revision (e.g. `@{u}` or `HEAD`), empty if the
@@ -384,6 +433,25 @@ impl Repo {
         Ok(raw
             .lines()
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Remote-tracking branches (`refs/remotes/`), recency order, e.g. "origin/main".
+    /// `origin/HEAD` (the symbolic default-branch pointer) is filtered out.
+    pub fn remote_branches(&self) -> Result<Vec<String>> {
+        let raw = git(
+            &self.root,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname:short)",
+                "refs/remotes/",
+            ],
+        )?;
+        Ok(raw
+            .lines()
+            .filter(|s| !s.is_empty() && !s.ends_with("/HEAD"))
             .map(str::to_string)
             .collect())
     }
@@ -418,6 +486,30 @@ impl Repo {
         std::fs::write(&full, content).with_context(|| format!("writing {:?}", full))?;
         Ok(())
     }
+}
+
+/// Parse `git diff --name-status -z` output into changed files. `-z` = NUL-separated
+/// fields: a status code then a path; renames/copies emit the code (e.g. "R100") followed by
+/// TWO paths (old, new) — we keep the new one. Shared by `diff_files`/`push_files`.
+fn parse_name_status(raw: &str) -> Vec<ChangedFile> {
+    let mut files = Vec::new();
+    let mut parts = raw.split('\0').filter(|s| !s.is_empty());
+    while let Some(stat) = parts.next() {
+        let code = stat.as_bytes().first().copied().unwrap_or(b'M') as char;
+        let path = if code == 'R' || code == 'C' {
+            let _old = parts.next();
+            parts.next()
+        } else {
+            parts.next()
+        };
+        let Some(path) = path else { break };
+        files.push(ChangedFile {
+            path: PathBuf::from(path),
+            status: classify(code, ' '),
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
 }
 
 fn classify(x: char, y: char) -> FileStatus {

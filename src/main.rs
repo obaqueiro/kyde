@@ -172,6 +172,63 @@ const RAIL_W: f32 = 38.0 + theme::FRAME_GAP * 2.0;
 enum Mode {
     Commit,
     Browse,
+    History,
+}
+
+/// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
+/// changed), `Latest` = vs HEAD, `Local` = vs the working tree.
+/// The two tabs of the git (Commit) view: staging working changes vs pushing committed ones.
+#[derive(Clone, Copy, PartialEq)]
+enum GitTab {
+    Commit,
+    Push,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CompareMode {
+    /// This commit vs its parent — what the commit changed (read-only).
+    Before,
+    /// This commit vs your working tree — editable.
+    Local,
+    /// The parent (before this commit) vs your working tree — editable.
+    BeforeLocal,
+}
+
+impl CompareMode {
+    const ALL: [CompareMode; 3] = [
+        CompareMode::Before,
+        CompareMode::Local,
+        CompareMode::BeforeLocal,
+    ];
+
+    /// Short label for the dropdown trigger chip.
+    fn label(self) -> &'static str {
+        match self {
+            CompareMode::Before => "Compare to previous commit",
+            CompareMode::Local => "Compare with Local",
+            CompareMode::BeforeLocal => "Compare before with Local",
+        }
+    }
+
+    /// One-line explanation shown in the dropdown menu (clears up the taxonomy).
+    fn desc(self) -> &'static str {
+        match self {
+            CompareMode::Before => "This commit vs its parent — what the commit changed",
+            CompareMode::Local => "This commit vs your working tree — editable",
+            CompareMode::BeforeLocal => {
+                "The parent (before this commit) vs your working tree — editable"
+            }
+        }
+    }
+
+    /// Stable element-id key (independent of the display label).
+    fn key(self) -> &'static str {
+        match self {
+            CompareMode::Before => "cmp-before",
+            CompareMode::Local => "cmp-local",
+            CompareMode::BeforeLocal => "cmp-before-local",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -251,6 +308,9 @@ enum MenuTarget {
     Tab(usize),
     /// The tab-bar overflow chooser (`▾`): a flat list of every open tab to jump to.
     TabList,
+    /// A commit row in the History list (by index into `history_commits`) — its menu offers
+    /// the same compare modes as the header dropdown.
+    HistoryCompare(usize),
 }
 
 struct ContextMenu {
@@ -539,6 +599,62 @@ struct Kyde {
     push_files: Vec<ChangedFile>,
     /// Base revision those files are diffed against (`@{u}` or the empty tree).
     push_base: String,
+    /// Which tab the git (Commit) view is showing — staging changes or pushing commits.
+    git_tab: GitTab,
+    /// Selected file index in the Push tab's list (drives its read-only diff).
+    push_selected: Option<usize>,
+
+    // History (git log) view
+    /// Revision being logged — a branch name, or "HEAD" for the current branch.
+    history_rev: String,
+    /// Path the log is scoped to (a folder/file), or `None` for the whole repo. Set when
+    /// the history view is opened from a Browse-tree folder's right-click menu.
+    history_path: Option<PathBuf>,
+    /// Commits shown in the log list (newest first).
+    history_commits: Vec<git::Commit>,
+    /// Selected commit index into `history_commits`.
+    history_selected: Option<usize>,
+    /// Files changed by the selected commit under the current compare mode.
+    history_files: Vec<ChangedFile>,
+    /// Selected file index into `history_files`.
+    history_file_selected: Option<usize>,
+    /// Folder tree of `history_files` (right pane of the history panel).
+    history_files_tree: tree::Tree,
+    /// Expanded dirs in the history files tree.
+    history_files_expanded: std::collections::HashSet<PathBuf>,
+    /// Search box filtering the history files tree.
+    history_files_query: Entity<CodeEditor>,
+    /// Height (px) of the history bottom panel (drag the top edge to resize).
+    history_panel_h: f32,
+    /// When true the history bottom panel is minimised to just its toolbar (the header
+    /// chevron toggles it), giving the diff the full height.
+    history_panel_collapsed: bool,
+    /// True while dragging the history panel's top (vertical) divider.
+    history_v_resizing: bool,
+    /// Cursor-to-divider gap captured at drag start, so the panel doesn't jolt to the
+    /// cursor on the first mouse-move (mirrors `diff_drag_offset` for the vertical axis).
+    history_v_drag_offset: f32,
+    /// What the selected commit is diffed against.
+    history_compare: CompareMode,
+    /// Compare-mode dropdown open in the history view.
+    history_compare_open: bool,
+    /// Branch-picker dropdown open in the history view.
+    history_branch_open: bool,
+    /// Local branches for the history branch picker (loaded when the dropdown opens).
+    history_locals: Vec<String>,
+    /// Remote-tracking branches for the history branch picker.
+    history_remotes: Vec<String>,
+    /// Search box filtering the history branch dropdown.
+    history_branch_query: Entity<CodeEditor>,
+    /// Search box filtering the commit list (subject / author / hash).
+    history_commit_query: Entity<CodeEditor>,
+    /// Scroll position of the commit list.
+    history_scroll: ScrollHandle,
+    /// Width (px) of the commit-list pane on the left of the history panel (resizable);
+    /// the changed-files pane fills the rest on the right.
+    history_commit_w: f32,
+    /// True while dragging the commit/files divider in the history panel.
+    history_resizing: bool,
 
     // Bottom terminal panel (gated behind the `terminal` Cargo feature).
     /// One `TerminalView` entity per tab, left→right in open order.
@@ -1152,6 +1268,7 @@ impl gpui::AssetSource for Assets {
         let bytes: &'static [u8] = match path {
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
             "icons/git-branch.svg" => include_bytes!("../assets/icons/git-branch.svg"),
+            "icons/history.svg" => include_bytes!("../assets/icons/history.svg"),
             #[cfg(feature = "terminal")]
             "icons/terminal.svg" => include_bytes!("../assets/icons/terminal.svg"),
             "icons/file-lines.svg" => include_bytes!("../assets/icons/file-lines.svg"),
@@ -1160,6 +1277,7 @@ impl gpui::AssetSource for Assets {
             "icons/check.svg" => include_bytes!("../assets/icons/check.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron-down.svg" => include_bytes!("../assets/icons/chevron-down.svg"),
+            "icons/chevrons-up.svg" => include_bytes!("../assets/icons/chevrons-up.svg"),
             "logo.png" => include_bytes!("../assets/logo.png"),
             _ => return Ok(None),
         };
@@ -1433,6 +1551,12 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.file_scroll
                 .set_offset(gpui::point(px(0.0), px(-600.0 * editor::line_height_px())));
             cx.notify();
+        }
+        // History view: the commit log for the current branch, first commit selected so the
+        // changed-files list + read-only diff are populated.
+        "history" => {
+            set_packs(view, &["rust"]);
+            view.enter_history(cx);
         }
         // Browse view with the bottom terminal panel open, seeded with a couple of commands
         // so the shot shows a live shell (prompt + output), not a bare box.
