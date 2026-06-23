@@ -18,10 +18,6 @@ So Kyde is just that. A fast native commit and diff code editor — a Git client
   <img src="assets/screenshots/git-diff.png" alt="Commit view — side-by-side diff with word-level highlighting and a center gutter to stage/revert hunks" width="900">
 </p>
 
-<p align="center">
-  <em>~120fps scrolling a 37k-line <code>package-lock.json</code> — viewport virtualization + off-thread highlighting.</em>
-</p>
-
 ## Goals
 
 * **Fast.** Native GPU rendering, low latency. 120fps even on large files.
