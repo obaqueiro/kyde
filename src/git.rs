@@ -315,32 +315,77 @@ impl Repo {
         res
     }
 
-    /// How many commits the current branch is ahead of its upstream. With an upstream,
-    /// that's `@{u}..HEAD`. With NO upstream yet (never pushed), every commit on HEAD is
-    /// unpushed, so count them all — otherwise the push button never appears for a first
-    /// push. `None` only when HEAD has no commits / is unborn (nothing to push).
+    /// How many commits the current branch is ahead of its push base (see `push_base_commit`).
+    /// `None` only when HEAD has no commits / is unborn (nothing to push).
     pub fn ahead_count(&self) -> Option<usize> {
-        let range = if git(&self.root, &["rev-parse", "@{u}"]).is_ok() {
-            "@{u}..HEAD"
-        } else {
-            "HEAD"
+        let range = match self.push_base_commit() {
+            Some(base) => format!("{base}..HEAD"),
+            // No remote base at all → every commit on HEAD is unpushed.
+            None => "HEAD".to_string(),
         };
-        git(&self.root, &["rev-list", "--count", range])
+        git(&self.root, &["rev-list", "--count", &range])
             .ok()?
             .trim()
             .parse()
             .ok()
     }
 
-    /// The base revision a push would be measured against: upstream if set, else
-    /// the empty tree (so a branch with no upstream shows every committed file as added).
-    pub fn push_base(&self) -> String {
-        if git(&self.root, &["rev-parse", "@{u}"]).is_ok() {
-            "@{u}".to_string()
-        } else {
-            // Well-known empty-tree object id — diffing against it lists all of HEAD.
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    /// The commit a push is measured against, resolved in priority order. `None` means there's
+    /// no remote reference point at all (no upstream, no remote, no mainline) — only then does
+    /// a push conceptually send all of HEAD.
+    ///
+    /// Crucially this does NOT fall back to the empty tree for a freshly-created local branch:
+    /// such a branch has no `@{u}`, but a push would only send the commits unique to it, so we
+    /// use the fork point from the remote's mainline branch — a brand-new branch with no new
+    /// commits then correctly shows nothing to push, not the entire repo.
+    fn push_base_commit(&self) -> Option<String> {
+        let verify =
+            |rev: &str| git(&self.root, &["rev-parse", "--verify", "--quiet", rev]).is_ok();
+        // 1. Tracking upstream.
+        if verify("@{u}") {
+            return Some("@{u}".to_string());
         }
+        // 2. A same-named remote branch (pushed before, but not set as upstream).
+        if let Some(branch) = self.current_branch() {
+            let r = format!("origin/{branch}");
+            if verify(&r) {
+                return Some(r);
+            }
+        }
+        // 3. Configured push destination.
+        if verify("@{push}") {
+            return Some("@{push}".to_string());
+        }
+        // 4. Fork point from the remote's mainline branch (the common "new local branch off
+        //    main, never pushed" case).
+        let mut mains: Vec<String> = Vec::new();
+        if let Ok(def) = git(&self.root, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+            let d = def.trim();
+            if !d.is_empty() && d != "origin/HEAD" {
+                mains.push(d.to_string());
+            }
+        }
+        mains.push("origin/main".to_string());
+        mains.push("origin/master".to_string());
+        for m in mains {
+            if verify(&m) {
+                if let Ok(mb) = git(&self.root, &["merge-base", "HEAD", &m]) {
+                    let mb = mb.trim();
+                    if !mb.is_empty() {
+                        return Some(mb.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The base revision a push would be diffed against (string form for `diff_files`).
+    /// Falls back to the empty tree only when there's genuinely no remote reference point.
+    pub fn push_base(&self) -> String {
+        self.push_base_commit()
+            // Well-known empty-tree object id — diffing against it lists all of HEAD.
+            .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
     }
 
     /// Files that differ between `push_base()` and HEAD — i.e. what a push would send.
@@ -624,5 +669,64 @@ mod tests {
         assert!(valid_ref("").is_err());
         assert_eq!(valid_ref("feature/x").unwrap(), "feature/x");
         assert_eq!(valid_ref("  main  ").unwrap(), "main"); // trims
+    }
+
+    /// A freshly-created local branch (no upstream) must measure a push from where it forked
+    /// off the remote mainline — NOT the empty tree (which used to report the whole repo as
+    /// "to push"). Builds a real repo + bare remote and checks `ahead_count`/`push_files`.
+    #[test]
+    fn new_branch_pushes_only_its_own_commits_not_whole_repo() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+
+        // Isolated temp workspace (pid keeps parallel `cargo test` runs from colliding).
+        let base = std::env::temp_dir().join(format!("kyde-pushbase-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let remote = base.join("remote.git");
+        let work = base.join("work");
+        fs::create_dir_all(&remote).unwrap();
+        fs::create_dir_all(&work).unwrap();
+
+        g(&remote, &["init", "--bare", "-b", "main"]);
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("a.txt"), "1\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+        g(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        g(&work, &["push", "-u", "origin", "main"]);
+        let _ = git(&work, &["remote", "set-head", "origin", "main"]);
+
+        let repo = Repo::discover(&work).unwrap();
+
+        // New branch off main, never pushed, no new commits → nothing to push.
+        g(&work, &["checkout", "-b", "feature"]);
+        assert_eq!(
+            repo.ahead_count(),
+            Some(0),
+            "a brand-new branch with no commits is 0 ahead"
+        );
+        assert!(
+            repo.push_files().is_empty(),
+            "a brand-new branch must not report the whole repo as unpushed"
+        );
+
+        // One commit on the branch → exactly that file is unpushed, 1 ahead.
+        fs::write(work.join("b.txt"), "2\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "feature work"]);
+        assert_eq!(repo.ahead_count(), Some(1));
+        let files = repo.push_files();
+        assert_eq!(files.len(), 1, "only the new commit's file is unpushed");
+        assert_eq!(files[0].path, PathBuf::from("b.txt"));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

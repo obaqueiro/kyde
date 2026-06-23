@@ -751,10 +751,45 @@ impl Render for ModalWindow {
     }
 }
 
-/// Make a user-typed branch name git-safe: trim and collapse any whitespace runs to single
-/// hyphens (git rejects spaces in ref names). Slashes etc. are left for git/`valid_ref`.
+/// Make a user-typed branch name git-safe (`git check-ref-format` rules), so typing a commit
+/// subject like `fix: thing here` yields the valid `fix-thing-here` instead of being rejected.
+/// Whitespace and every character git forbids in a ref (`~ ^ : ? * [ \` + control chars)
+/// become single hyphens (runs collapsed); the `@{` and `..` sequences are removed; and
+/// leading/trailing `/ . -` plus a trailing `.lock` are trimmed. Internal `/` is preserved so
+/// namespaced names (`feat/x`) still work.
 fn slugify_branch(name: &str) -> String {
-    name.split_whitespace().collect::<Vec<_>>().join("-")
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.trim().chars() {
+        let forbidden = ch.is_whitespace()
+            || matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+            || (ch as u32) < 0x20
+            || ch == '\x7f';
+        if forbidden {
+            // Collapse any run of forbidden chars to one hyphen.
+            if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        } else {
+            out.push(ch);
+            prev_dash = false;
+        }
+    }
+    // git also forbids the `@{` and `..` sequences anywhere in a ref, and `//`.
+    out = out.replace("@{", "-");
+    while out.contains("..") {
+        out = out.replace("..", ".");
+    }
+    while out.contains("//") {
+        out = out.replace("//", "/");
+    }
+    // No leading/trailing `/ . -`; strip a trailing `.lock` (also disallowed).
+    let mut s = out.trim_matches(['/', '.', '-']).to_string();
+    if let Some(stripped) = s.strip_suffix(".lock") {
+        s = stripped.trim_end_matches(['/', '.', '-']).to_string();
+    }
+    s
 }
 
 fn status_color(s: FileStatus) -> gpui::Rgba {
@@ -1781,6 +1816,16 @@ mod gpui_smoke_tests {
             slugify_branch("feat/compare-overrides"),
             "feat/compare-overrides"
         );
+        // Pasting a commit subject: `:` and spaces are git-forbidden → hyphens, runs collapsed.
+        assert_eq!(
+            slugify_branch("fix: new branch shows whole repo"),
+            "fix-new-branch-shows-whole-repo"
+        );
+        // Other forbidden chars + sequences are sanitised; namespacing slash preserved.
+        assert_eq!(slugify_branch("wip/foo?*bar~baz"), "wip/foo-bar-baz");
+        assert_eq!(slugify_branch("a..b@{c"), "a.b-c");
+        assert_eq!(slugify_branch("///lead..trail///"), "lead.trail");
+        assert_eq!(slugify_branch("hotfix.lock"), "hotfix");
 
         let (handle, _dir) = boot(cx);
         handle
