@@ -12,13 +12,24 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 APP="dist/Kyde.app"
-BIN="target/release/kyde"
+
+# Optional TARGET (e.g. x86_64-apple-darwin / aarch64-apple-darwin) so CI can build a
+# specific arch for per-arch release assets. Unset → host arch (the dev default).
+TARGET="${TARGET:-}"
 
 # Always (re)build — cargo is incremental, so this is cheap when nothing changed,
 # and it avoids shipping a STALE binary (e.g. one with an out-of-date embedded
-# icon from a prior compile) just because target/release/kyde already exists.
-echo "building release binary…"
-cargo build --release
+# icon from a prior compile) just because the binary already exists.
+if [ -n "$TARGET" ]; then
+    echo "building release binary for ${TARGET}..."
+    rustup target add "$TARGET" >/dev/null 2>&1 || true
+    cargo build --release --target "$TARGET"
+    BIN="target/$TARGET/release/kyde"
+else
+    echo "building release binary..."
+    cargo build --release
+    BIN="target/release/kyde"
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
