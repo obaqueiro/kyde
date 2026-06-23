@@ -388,6 +388,10 @@ impl Render for Kyde {
                 }),
             )
             .child(titlebar)
+            // Update-available banner sits directly under the titlebar (only when behind).
+            .when(self.update_available.is_some(), |d| {
+                d.child(self.render_update_banner(ui, cx))
+            })
             .child(main_row);
         let mut root = root
             // Git-op error + crash banners at the bottom (just above the status bar).
@@ -3704,6 +3708,81 @@ impl Kyde {
 
     /// Top-of-editor prompt offering to install syntax support for the open file.
     /// IntelliJ-style: a thin bar with a primary (#3473EE) Install button.
+    /// Top-of-window banner shown only when a newer release exists. The action is
+    /// "Update & Relaunch" when running from a `.app` bundle (downloads + swaps in place),
+    /// else "Download" (opens the release page) — see `do_update`.
+    fn render_update_banner(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let Some(rel) = self.update_available.as_ref() else {
+            return div().into_any_element();
+        };
+        let can_swap = update::running_bundle().is_some() && !rel.zip_url.is_empty();
+        let action_label = if self.updating {
+            "Updating…"
+        } else if can_swap {
+            "Update & Relaunch"
+        } else {
+            "Download"
+        };
+        let msg: SharedString = format!("Update available — v{}", rel.version).into();
+
+        // ↑ badge
+        let badge = div()
+            .flex_none()
+            .size(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(t.primary)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(gpui::white())
+                    .child("↑"),
+            );
+
+        let updating = self.updating;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .bg(t.bg_mid)
+            .border_b_1()
+            .border_color(t.divider)
+            .font_family(ui)
+            .text_size(px(t.ui_font_size))
+            .text_color(t.text)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(badge)
+                    .child(msg),
+            )
+            // Spacer pushes the actions to the right.
+            .child(div().flex_1().min_w_0())
+            .child(
+                btn_primary("update-now", action_label)
+                    .when(updating, |d| d.opacity(0.6))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.do_update(cx)),
+                    ),
+            )
+            .child(btn_secondary("update-dismiss", "Dismiss").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.dismiss_update(cx)),
+            ))
+            .into_any_element()
+    }
+
     fn render_install_banner(
         &self,
         pack: &'static highlight::Pack,

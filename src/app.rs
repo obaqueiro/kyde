@@ -331,6 +331,8 @@ impl Kyde {
             push_base: String::new(),
             git_tab: GitTab::Commit,
             push_selected: None,
+            update_available: None,
+            updating: false,
             history_rev: "HEAD".to_string(),
             history_path: None,
             history_commits: Vec::new(),
@@ -366,6 +368,22 @@ impl Kyde {
             term_resizing: false,
         };
         me.refresh();
+        // Background: ask GitHub if there's a newer release, then surface the update banner.
+        // Network I/O off the UI thread; failures stay silent.
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { update::check().ok().flatten() })
+                .await;
+            if let Some(rel) = found {
+                this.update(cx, |this, cx| {
+                    this.update_available = Some(rel);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
         me
     }
 
@@ -896,6 +914,99 @@ impl Kyde {
             .ok();
         })
         .detach();
+    }
+
+    /// Act on the update banner. Running from a `.app` bundle with a zip asset → download,
+    /// swap in place, relaunch. Otherwise (dev binary, or a release with no zip) → open the
+    /// release page in the browser.
+    pub(crate) fn do_update(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.update_available.clone() else {
+            return;
+        };
+        match update::running_bundle() {
+            Some(bundle) if !rel.zip_url.is_empty() => {
+                if self.updating {
+                    return;
+                }
+                self.updating = true;
+                cx.notify();
+                let zip = rel.zip_url.clone();
+                cx.spawn(async move |this, cx| {
+                    let res = cx
+                        .background_executor()
+                        .spawn({
+                            let bundle = bundle.clone();
+                            async move { update::download_and_swap(&zip, &bundle) }
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.updating = false;
+                        match res {
+                            // Relaunch the freshly-swapped bundle, then quit this instance.
+                            Ok(()) => {
+                                let _ = std::process::Command::new("open").arg(&bundle).spawn();
+                                cx.quit();
+                            }
+                            Err(e) => {
+                                this.op_error = Some(format!("Update failed: {e}"));
+                                cx.notify();
+                            }
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            _ => {
+                // No bundle to swap (dev binary). Download the zip to ~/Downloads and reveal
+                // it in Finder; only fall back to the release page if there's no zip asset.
+                if rel.zip_url.is_empty() {
+                    let url = if rel.page_url.is_empty() {
+                        "https://github.com/kyle-ssg/kyde/releases/latest".to_string()
+                    } else {
+                        rel.page_url.clone()
+                    };
+                    let _ = std::process::Command::new("open").arg(url).spawn();
+                    return;
+                }
+                if self.updating {
+                    return;
+                }
+                self.updating = true;
+                cx.notify();
+                let zip = rel.zip_url.clone();
+                cx.spawn(async move |this, cx| {
+                    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join("Downloads");
+                    let res = cx
+                        .background_executor()
+                        .spawn(async move { update::download_zip(&zip, &dir) })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.updating = false;
+                        match res {
+                            // Reveal the downloaded zip so the user can install it.
+                            Ok(path) => {
+                                let _ = std::process::Command::new("open")
+                                    .arg("-R")
+                                    .arg(&path)
+                                    .spawn();
+                            }
+                            Err(e) => this.op_error = Some(format!("Download failed: {e}")),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Dismiss the update banner for this session (reappears on next launch if still behind).
+    pub(crate) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
+        self.update_available = None;
+        cx.notify();
     }
 
     /// Pull = fetch + rebase local commits on top (auto-stashing edits), off the UI thread.
