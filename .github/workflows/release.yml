@@ -43,11 +43,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Serialize so the arm64 asset is uploaded FIRST. The updater shipped before per-arch
+      # assets picks the *first* `.zip` in a release (it ignores names), and every existing
+      # user is arm64 — so arm64 must land first or those users' old updater would grab the
+      # x86_64 zip (Rosetta). New (arch-aware) updaters pick by name regardless of order.
+      max-parallel: 1
       matrix:
         include:
-          - name: macos
+          # Two macOS slices shipped as separate assets; the in-app updater downloads the one
+          # matching the user's CPU. Both build on the Apple-Silicon runner (x86_64 via the
+          # cross target) so we don't depend on the deprecating Intel runners.
+          #
+          # arm64 keeps the original `kyde-macos.zip` name for backwards compatibility with the
+          # already-shipped (name-agnostic, first-zip) updater; the new updater treats a name
+          # with no arch token as the arm64/generic build.
+          - name: macos-arm64
             os: macos-15
-            bin: kyde
+            target: aarch64-apple-darwin
+            asset: kyde-macos.zip
+          - name: macos-x86_64
+            os: macos-15
+            target: x86_64-apple-darwin
+            asset: kyde-macos-x86_64.zip
           # Parked (macOS-only releases for now). These worked; to revive a platform,
           # uncomment its matrix entry here AND its package step further down.
           # - name: linux
@@ -61,9 +78,13 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       # Parked with the Linux matrix entry above.
       # - name: Install Linux deps
@@ -77,21 +98,19 @@ jobs:
       #       libx11-dev libxcb1-dev libvulkan-dev \
       #       clang cmake
 
-      - name: Build (release)
-        run: cargo build --release
-
-      # Wrap the binary in Kyde.app. bundle-macos.sh ad-hoc-signs it as a baseline so an
-      # unsigned bundle never ships; the next step upgrades that to Developer ID + notarize.
-      - name: Bundle .app
-        if: matrix.name == 'macos'
-        run: ./scripts/bundle-macos.sh
+      # Build the matrix arch and wrap it in Kyde.app. bundle-macos.sh ad-hoc-signs it as a
+      # baseline so an unsigned bundle never ships; the next step upgrades that to Developer
+      # ID + notarize.
+      - name: Build + bundle .app
+        if: startsWith(matrix.name, 'macos')
+        run: TARGET=${{ matrix.target }} ./scripts/bundle-macos.sh
 
       # Developer ID sign + notarize. No-ops (keeps the ad-hoc app) until the signing secrets
       # are configured, so releases never break waiting on the Apple setup. Secrets:
       # APPLE_CERT_P12_BASE64 (base64 .p12), APPLE_CERT_P12_PASSWORD, APPLE_SIGN_IDENTITY,
       # APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID (notarize auth) — see .env / README.
       - name: Sign + notarize (Developer ID)
-        if: matrix.name == 'macos'
+        if: startsWith(matrix.name, 'macos')
         env:
           APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
           APPLE_CERT_P12_PASSWORD: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
@@ -136,8 +155,8 @@ jobs:
           security delete-keychain "$KEYCHAIN"
 
       - name: Package .app (macos)
-        if: matrix.name == 'macos'
-        run: ditto -c -k --keepParent dist/Kyde.app kyde-macos.zip
+        if: startsWith(matrix.name, 'macos')
+        run: ditto -c -k --keepParent dist/Kyde.app "${{ matrix.asset }}"
 
       # Parked with the Linux matrix entry above.
       # - name: Package AppImage (linux)
@@ -159,4 +178,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            kyde-${{ matrix.name }}.* --clobber
+            "${{ matrix.asset }}" --clobber

@@ -98,22 +98,63 @@ pub fn parse_feed(body: &str, current: &str) -> Option<Release> {
         return None;
     }
     let page_url = json["html_url"].as_str().unwrap_or("").to_string();
-    // Prefer a `.zip` asset (the macOS build attaches `kyde-macos.zip`); empty if none.
-    let zip_url = json["assets"]
+    // Pick the asset matching the running CPU (e.g. `kyde-macos-arm64.zip` on Apple Silicon,
+    // `kyde-macos-x86_64.zip` on Intel), falling back to a generic/legacy zip. Empty if none.
+    let urls: Vec<&str> = json["assets"]
         .as_array()
-        .and_then(|assets| {
-            assets.iter().find_map(|a| {
-                let url = a["browser_download_url"].as_str()?;
-                url.ends_with(".zip").then(|| url.to_string())
-            })
+        .map(|assets| {
+            assets
+                .iter()
+                .filter_map(|a| a["browser_download_url"].as_str())
+                .collect()
         })
         .unwrap_or_default();
+    let zip_url = pick_asset_url(&urls, std::env::consts::ARCH).unwrap_or_default();
     Some(Release {
         version: norm(&tag),
         tag,
         zip_url,
         page_url,
     })
+}
+
+/// Filename tokens that identify a build for `arch` (Rust's `std::env::consts::ARCH`).
+fn arch_tokens(arch: &str) -> &'static [&'static str] {
+    match arch {
+        "aarch64" => &["arm64", "aarch64"],
+        "x86_64" => &["x86_64", "x86-64", "x64", "intel"],
+        _ => &[],
+    }
+}
+
+/// Every arch token we recognise — used to tell an arch-specific asset from a generic one.
+const ALL_ARCH_TOKENS: &[&str] = &["arm64", "aarch64", "x86_64", "x86-64", "x64", "intel"];
+
+/// Choose the `.zip` asset for `arch` from a release's asset URLs:
+///   1. an asset whose name carries this arch's token (`…-arm64.zip` / `…-x86_64.zip`);
+///   2. else a *generic* zip with no arch token (covers single-asset / legacy releases like
+///      `kyde-macos.zip`);
+///   3. else `None` — never install an explicitly wrong-arch build.
+pub fn pick_asset_url(urls: &[&str], arch: &str) -> Option<String> {
+    let mine = arch_tokens(arch);
+    let zips = || {
+        urls.iter()
+            .copied()
+            .filter(|u| u.to_lowercase().ends_with(".zip"))
+    };
+    if let Some(u) = zips().find(|u| {
+        let l = u.to_lowercase();
+        mine.iter().any(|t| l.contains(t))
+    }) {
+        return Some(u.to_string());
+    }
+    if let Some(u) = zips().find(|u| {
+        let l = u.to_lowercase();
+        !ALL_ARCH_TOKENS.iter().any(|t| l.contains(t))
+    }) {
+        return Some(u.to_string());
+    }
+    None
 }
 
 /// Download `zip_url`, unzip, and swap the new `Kyde.app` over `bundle` in place. On success
@@ -294,6 +335,39 @@ mod tests {
         // Same/newer current → nothing to offer.
         assert_eq!(parse_feed(feed, "1.2.0"), None);
         assert_eq!(parse_feed(feed, "1.3.0"), None);
+    }
+
+    #[test]
+    fn pick_asset_matches_running_arch() {
+        let arm = "https://x/kyde-macos-arm64.zip";
+        let intel = "https://x/kyde-macos-x86_64.zip";
+        let urls = [arm, intel, "https://x/notes.txt"];
+        // Each arch picks its own slice.
+        assert_eq!(pick_asset_url(&urls, "aarch64").as_deref(), Some(arm));
+        assert_eq!(pick_asset_url(&urls, "x86_64").as_deref(), Some(intel));
+        // A generic/legacy single asset is used by any arch.
+        let legacy = ["https://x/kyde-macos.zip"];
+        assert_eq!(
+            pick_asset_url(&legacy, "aarch64").as_deref(),
+            Some("https://x/kyde-macos.zip")
+        );
+        assert_eq!(
+            pick_asset_url(&legacy, "x86_64").as_deref(),
+            Some("https://x/kyde-macos.zip")
+        );
+        // Never install an explicitly wrong-arch build (only arm offered, we're Intel).
+        assert_eq!(pick_asset_url(&[arm], "x86_64"), None);
+        // No zip at all.
+        assert_eq!(pick_asset_url(&["https://x/notes.txt"], "aarch64"), None);
+
+        // Real shipping layout: arm64 keeps the generic `kyde-macos.zip` name (back-compat),
+        // Intel is the suffixed one. arm64 falls through to the generic; Intel matches.
+        let shipping = ["https://x/kyde-macos.zip", intel];
+        assert_eq!(
+            pick_asset_url(&shipping, "aarch64").as_deref(),
+            Some("https://x/kyde-macos.zip")
+        );
+        assert_eq!(pick_asset_url(&shipping, "x86_64").as_deref(), Some(intel));
     }
 
     #[test]
