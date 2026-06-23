@@ -209,7 +209,7 @@ shoot() {
 }
 
 # Map each README screenshot to its shot. (file ← state)
-declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback terminal fps)
+declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal fps)
 want="${1:-all}"
 
 # EVERY shot is FPS-gated: the speed pitch is the whole point, so a screenshot only counts
@@ -243,6 +243,7 @@ run_one() {
         go-to-file)       shoot_until go-to-file       go-to-file.png       window ;;
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
         rollback)         shoot_until rollback         rollback.png         region ;;
+        history)          shoot_until history          history.png          window ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         *) echo "unknown shot: $1"; exit 2 ;;

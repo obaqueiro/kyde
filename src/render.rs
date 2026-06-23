@@ -94,6 +94,7 @@ impl Render for Kyde {
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| match to {
                         Mode::Commit => this.enter_commit(cx),
+                        Mode::History => this.enter_history(cx),
                         Mode::Browse => {
                             this.mode = Mode::Browse;
                             cx.notify();
@@ -156,6 +157,13 @@ impl Render for Kyde {
                 self.mode == Mode::Commit,
                 Mode::Commit,
                 cx,
+            ))
+            .child(mode_btn(
+                "icons/history.svg",
+                "History",
+                self.mode == Mode::History,
+                Mode::History,
+                cx,
             ));
         // Terminal toggle — pinned to the BOTTOM of the rail (IDE-style tool strip), only
         // when a project is open (the shell roots at the project). A flex spacer between the
@@ -196,6 +204,7 @@ impl Render for Kyde {
         let inner = match self.mode {
             Mode::Commit => self.render_commit(ui, fs, window, cx),
             Mode::Browse => self.render_browse(ui, fs, window, cx),
+            Mode::History => self.render_history(ui, fs, window, cx),
         };
         // Frame gap around the island panels (rail provides the left chrome).
         let body = div()
@@ -245,9 +254,10 @@ impl Render for Kyde {
             .bg(theme::get().frame_bg)
             // While dragging the divider, pin the resize cursor across the whole window so
             // it doesn't flicker as the pointer sweeps over rows/editor.
-            .when(self.tree_resizing || self.diff_resizing, |d| {
-                d.cursor_col_resize()
-            })
+            .when(
+                self.tree_resizing || self.diff_resizing || self.history_resizing,
+                |d| d.cursor_col_resize(),
+            )
             .on_action(cx.listener(Self::act_go_to_file))
             .on_action(cx.listener(Self::act_find_in_files))
             .on_action(cx.listener(Self::act_actions))
@@ -305,6 +315,21 @@ impl Render for Kyde {
                             / island_w;
                         this.diff_split = frac.clamp(0.15, 0.85);
                         cx.notify();
+                    } else if this.history_resizing {
+                        // Commit/files divider: the commit list is on the left, so its width =
+                        // cursor x − the panel's left edge (the rail's right edge).
+                        let vw = f32::from(window.viewport_size().width);
+                        let w = f32::from(e.position.x) - RAIL_W;
+                        let panel_w = (vw - RAIL_W - theme::FRAME_GAP).max(1.0);
+                        this.history_commit_w = w.clamp(200.0, (panel_w - 160.0).max(200.0));
+                        cx.notify();
+                    } else if this.history_v_resizing {
+                        // History panel height = window bottom (minus status bar + body pad) −
+                        // cursor y. Drag the strip between the diff and the log panel.
+                        let vh = f32::from(window.viewport_size().height);
+                        let h = vh - f32::from(e.position.y) - 34.0 - this.history_v_drag_offset;
+                        this.history_panel_h = h.clamp(140.0, (vh - 180.0).max(140.0));
+                        cx.notify();
                     } else if let Some(drag) = this.sb_drag.clone() {
                         // Drag a scrollbar thumb: move the dragged view's content so the thumb
                         // tracks the cursor. Works for any view via the carried scroll handle.
@@ -343,11 +368,15 @@ impl Render for Kyde {
                     if this.tree_resizing
                         || this.diff_resizing
                         || this.diff_pane_resizing
+                        || this.history_resizing
+                        || this.history_v_resizing
                         || this.sb_drag.is_some()
                     {
                         this.tree_resizing = false;
                         this.diff_resizing = false;
                         this.diff_pane_resizing = false;
+                        this.history_resizing = false;
+                        this.history_v_resizing = false;
                         this.sb_drag = None;
                         cx.notify();
                     }
@@ -904,6 +933,604 @@ impl Kyde {
             .child(divider)
             .child(self.render_diff(ui, fs, Some(window), cx))
             .into_any_element()
+    }
+
+    /// History (git log) view: a commit list (left), the selected commit's changed files
+    /// (middle), and a read-only side-by-side diff (right). A branch dropdown picks which
+    /// ref to log; a segmented control picks what the commit is diffed against.
+    fn render_history(
+        &mut self,
+        ui: &'static str,
+        fs: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+
+        // ── header: branch chip + commit search + compare-mode segmented control ──
+        let rev_label: SharedString = format!("⎇ {}", self.history_rev).into();
+        let branch_chip = div()
+            .id("hist-branch")
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .border_1()
+            .border_color(t.divider)
+            .text_color(t.secondary_text)
+            .cursor_pointer()
+            .hover(|d| d.bg(t.bg_mid))
+            .child(rev_label)
+            // Chevron → reads as a select.
+            .child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .size(px(14.0))
+                    .text_color(t.line_number),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.toggle_history_branches(cx);
+                    if this.history_branch_open {
+                        window.focus(&this.history_branch_query.read(cx).focus_handle.clone());
+                    }
+                }),
+            );
+
+        // Compare-mode dropdown trigger (replaces the old segmented control). The menu itself
+        // is rendered near the branch dropdown below (anchored above the panel).
+        let cmp_label: SharedString = self.history_compare.label().into();
+        let compare_chip = div()
+            .id("hist-compare")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .border_1()
+            .border_color(t.divider)
+            .text_color(t.secondary_text)
+            .text_size(px(t.ui_font_size))
+            .cursor_pointer()
+            .hover(|d| d.bg(t.bg_mid))
+            .child(cmp_label)
+            .child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .size(px(14.0))
+                    .text_color(t.line_number),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.history_compare_open = !this.history_compare_open;
+                    cx.notify();
+                }),
+            );
+        // Scope chip: shown when the log is restricted to a folder/file; click clears it.
+        let scope_chip = self.history_path.as_ref().map(|p| {
+            let label: SharedString = format!("▸ {}", p.to_string_lossy()).into();
+            div()
+                .id("hist-scope")
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(t.bg_mid)
+                .text_color(t.secondary_text)
+                .cursor_pointer()
+                .hover(|d| d.bg(t.bg_light))
+                .tooltip(|_w, cx| cx.new(|_| Tip("Clear path filter".into())).into())
+                .child(label)
+                .child(div().text_color(t.line_number).child("×"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.enter_history(cx)),
+                )
+        });
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .px_1()
+            // Equal top/bottom gap to the divider below.
+            .pt(px(theme::FRAME_GAP))
+            .pb(px(theme::FRAME_GAP))
+            .font_family(ui)
+            .child(branch_chip)
+            .children(scope_chip)
+            // Commit search box, immediately right of the branch dropdown.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // Right margin matches the branch chip's left inset (header px_1).
+                    .mr_1()
+                    .px_2()
+                    // py_1 + 18px editor line + 2px border = 28px, matching the chip's h(28).
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.divider)
+                    .text_size(px(t.ui_font_size))
+                    .child(self.history_commit_query.clone()),
+            )
+            .child(compare_chip);
+
+        // ── commit list (filtered by the commit search box) ──
+        let cq = self
+            .history_commit_query
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        let commit_rows: Vec<gpui::AnyElement> = self
+            .history_commits
+            .iter()
+            .enumerate()
+            // Keep the original index (drives selection); match subject / author / hash.
+            .filter(|(_, c)| {
+                cq.is_empty()
+                    || c.subject.to_lowercase().contains(&cq)
+                    || c.author.to_lowercase().contains(&cq)
+                    || c.short.to_lowercase().contains(&cq)
+            })
+            .map(|(i, c)| {
+                let selected = self.history_selected == Some(i);
+                let subject: SharedString = c.subject.clone().into();
+                let meta: SharedString = format!("{} · {} · {}", c.short, c.author, c.date).into();
+                let refs = c.refs.clone();
+                div()
+                    .id(("hist-commit", i))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(t.selected_bg))
+                    .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(t.text)
+                                    .child(subject),
+                            )
+                            .when(!refs.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(t.bg_mid)
+                                        .text_size(px(10.0))
+                                        .text_color(t.primary)
+                                        .child(SharedString::from(refs.clone())),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(t.line_number)
+                            .truncate()
+                            .child(meta),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| this.select_history_commit(i, cx)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        // Scrollable commit list, wrapped in a flex-basis sizer (the basis must live on a
+        // plain wrapper, NOT on the scroll element itself — that's why it collapsed before;
+        // mirrors how render_diff sizes its two panes). Default 2/3 of the panel width.
+        let commit_pane = div()
+            .id("hist-commits")
+            .overflow_y_scroll()
+            .track_scroll(&self.history_scroll)
+            .size_full()
+            .flex()
+            .flex_col()
+            .py_1()
+            .font_family(ui)
+            .text_size(px(t.ui_font_size + 1.0))
+            .children(commit_rows);
+        // Commit list = a fixed (resizable) pixel width on the LEFT; files pane = flex_1 on
+        // the right. Order matters: a flex_1 scroll pane placed BEFORE a flex_none sibling
+        // pushes it off-screen (clipped). So fixed-first + flex_1-last, exactly like the
+        // commit view's tree(fixed) + diff(flex) split. (Percentage flex-basis also doesn't
+        // resolve in this column-nested row, so pixels it is.)
+        let commit_wrap = div()
+            .w(px(self.history_commit_w))
+            .flex_none()
+            .h_full()
+            .child(commit_pane);
+
+        // ── changed files of the selected commit, as a folder tree + a search box ──
+        let fq = self
+            .history_files_query
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        let mut visible = vec![tree::Row {
+            path: PathBuf::new(),
+            is_dir: true,
+            depth: 0,
+        }];
+        if self.history_files_expanded.contains(&PathBuf::new()) {
+            for mut r in self
+                .history_files_tree
+                .visible(&self.history_files_expanded)
+            {
+                r.depth += 1;
+                visible.push(r);
+            }
+        }
+        // Filter by the search box: keep root, matching files, and dirs containing a match.
+        if !fq.is_empty() {
+            let files = &self.history_files;
+            visible.retain(|r| {
+                r.path.as_os_str().is_empty()
+                    || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&fq))
+                    || (r.is_dir
+                        && files.iter().any(|f| {
+                            f.path.starts_with(&r.path)
+                                && f.path.to_string_lossy().to_lowercase().contains(&fq)
+                        }))
+            });
+        }
+        let file_rows: Vec<gpui::AnyElement> = visible
+            .into_iter()
+            .map(|r| {
+                let is_root = r.path.as_os_str().is_empty();
+                let file_idx = (!r.is_dir)
+                    .then(|| self.history_files.iter().position(|f| f.path == r.path))
+                    .flatten();
+                let selected = file_idx.is_some() && self.history_file_selected == file_idx;
+                let name_color = file_idx
+                    .and_then(|i| self.history_files.get(i))
+                    .map(|f| status_color(f.status))
+                    .unwrap_or(t.text);
+                let name: SharedString = if is_root {
+                    "Files".into()
+                } else {
+                    r.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        .into()
+                };
+                let expanded = self.history_files_expanded.contains(&r.path);
+                let is_dir = r.is_dir;
+                let p_act = r.path.clone();
+                self.tree_row(
+                    cx,
+                    &r.path,
+                    is_dir,
+                    expanded,
+                    r.depth,
+                    selected,
+                    name,
+                    name_color,
+                    None,
+                    move |this, _e, _w, cx| {
+                        if is_dir {
+                            if !this.history_files_expanded.remove(&p_act) {
+                                this.history_files_expanded.insert(p_act.clone());
+                            }
+                            cx.notify();
+                        } else if let Some(i) =
+                            this.history_files.iter().position(|f| f.path == p_act)
+                        {
+                            this.select_history_file(i, cx);
+                        }
+                    },
+                    |_this, _cx| {},
+                    |_this, _pos, _cx| {},
+                )
+            })
+            .collect();
+        let files_search = div()
+            .flex_none()
+            .px_2()
+            .py_1p5()
+            .text_size(px(t.ui_font_size))
+            .child(self.history_files_query.clone());
+        let files_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
+        let files_tree = div()
+            .id("hist-files")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .px_1()
+            .py_1()
+            .children(file_rows);
+        let files_wrap = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .font_family(ui)
+            .text_size(px(t.ui_font_size + 1.0))
+            .child(files_search)
+            .child(files_hr)
+            .child(files_tree);
+
+        // Flat 1px dividers between sections (IntelliJ-style), not frame-gap islands.
+        let hdiv = || div().h(px(3.0)).flex_none().bg(t.bg_light);
+        // Draggable commit/files divider (sets `history_resizing`; the root move handler
+        // updates `history_split`). A touch wider than 1px so it's easy to grab.
+        let split_divider = div()
+            .id("hist-split")
+            .w(px(5.0))
+            .flex_none()
+            .h_full()
+            .cursor_col_resize()
+            .child(div().w(px(1.0)).h_full().mx(px(2.0)).bg(t.divider))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.history_resizing = true;
+                    cx.notify();
+                }),
+            );
+
+        // Bottom panel (one island): toolbar, then commit list | files, divider-split.
+        // Height is drag-resizable via the strip above it (`history_panel_h`).
+        let panel_h = self.history_panel_h;
+        let bottom = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h(px(panel_h))
+            .bg(t.main_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .overflow_hidden()
+            .child(header)
+            .child(hdiv())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .child(commit_wrap)
+                    .child(split_divider)
+                    .child(files_wrap),
+            );
+
+        // Drag strip between the diff (top) and the log panel (bottom) — resizes the panel.
+        let v_divider = div()
+            .id("hist-vsplit")
+            .h(px(theme::FRAME_GAP))
+            .flex_none()
+            .w_full()
+            .cursor_row_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.history_v_resizing = true;
+                    // Pin the current height: offset = where the formula would put us minus the
+                    // actual height, so the first move keeps the panel exactly where it is.
+                    let vh = f32::from(window.viewport_size().height);
+                    this.history_v_drag_offset =
+                        (vh - f32::from(e.position.y) - 34.0) - this.history_panel_h;
+                    cx.notify();
+                }),
+            );
+
+        // Top = diff (main), divider, bottom = the log panel.
+        let mut root = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(self.render_diff(ui, fs, Some(window), cx))
+            .child(v_divider)
+            .child(bottom);
+
+        // Branch dropdown: a search box over Local / Remote sections, anchored ABOVE the
+        // bottom-panel toolbar (it grows up over the diff so it isn't clipped by the panel).
+        // A transparent backdrop closes it.
+        if self.history_branch_open {
+            let q = self
+                .history_branch_query
+                .read(cx)
+                .text()
+                .trim()
+                .to_lowercase();
+            let matches = |n: &str| q.is_empty() || n.to_lowercase().contains(&q);
+            let cur = self.history_rev.clone();
+            let locals: Vec<String> = self
+                .history_locals
+                .iter()
+                .filter(|n| matches(n))
+                .cloned()
+                .collect();
+            let remotes: Vec<String> = self
+                .history_remotes
+                .iter()
+                .filter(|n| matches(n))
+                .cloned()
+                .collect();
+            // One clickable branch row → re-log that ref.
+            let mk = |b: String, cx: &mut Context<Self>| {
+                let selected = b == cur;
+                let label: SharedString = b.clone().into();
+                div()
+                    .id(SharedString::from(format!("hist-rev-{b}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(t.text)
+                    .when(selected, |d| d.bg(t.selected_bg))
+                    .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
+                    .child(label)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| this.set_history_rev(b.clone(), cx)),
+                    )
+                    .into_any_element()
+            };
+            let section = |label: &'static str| {
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_size(px(10.0))
+                    .text_color(t.line_number)
+                    .child(label)
+            };
+            let mut menu = div()
+                .id("hist-rev-list")
+                .absolute()
+                // Anchor just above the bottom panel's toolbar; grows upward over the diff.
+                .bottom(px(panel_h + 2.0))
+                .left(px(2.0))
+                .flex()
+                .flex_col()
+                .max_h(px(380.0))
+                .overflow_y_scroll()
+                .min_w(px(260.0))
+                .p_1()
+                .bg(t.panel_bg)
+                .border_1()
+                .border_color(t.divider)
+                .rounded_md()
+                .font_family(ui)
+                .text_size(px(t.ui_font_size))
+                // Clicks inside the menu must not fall through to the backdrop (which closes).
+                .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
+                    cx.stop_propagation()
+                })
+                .child(div().px_1().pb_1().child(self.history_branch_query.clone()));
+            if matches("HEAD") {
+                menu = menu.child(mk("HEAD".to_string(), cx));
+            }
+            if !locals.is_empty() {
+                menu = menu.child(section("LOCAL"));
+                for b in locals {
+                    menu = menu.child(mk(b, cx));
+                }
+            }
+            if !remotes.is_empty() {
+                menu = menu.child(section("REMOTE"));
+                for b in remotes {
+                    menu = menu.child(mk(b, cx));
+                }
+            }
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.history_branch_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(menu),
+            );
+        }
+
+        // Compare-mode dropdown: anchored above the panel toolbar on the RIGHT (the chip is
+        // top-right). Each row = label + one-line description so the taxonomy is self-explaining.
+        if self.history_compare_open {
+            let cur = self.history_compare;
+            let mut menu = div()
+                .id("hist-compare-list")
+                .absolute()
+                .bottom(px(panel_h + 2.0))
+                .right(px(2.0))
+                .flex()
+                .flex_col()
+                .min_w(px(300.0))
+                .p_1()
+                .bg(t.panel_bg)
+                .border_1()
+                .border_color(t.divider)
+                .rounded_md()
+                .font_family(ui)
+                .text_size(px(t.ui_font_size))
+                .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
+                    cx.stop_propagation()
+                });
+            for mode in CompareMode::ALL {
+                let selected = mode == cur;
+                menu = menu.child(
+                    div()
+                        .id(mode.key())
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(selected, |d| d.bg(t.selected_bg))
+                        .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
+                        .child(div().text_color(t.text).child(mode.label()))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(t.line_number)
+                                .child(mode.desc()),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| this.set_history_compare(mode, cx)),
+                        ),
+                );
+            }
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.history_compare_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(menu),
+            );
+        }
+
+        root.into_any_element()
     }
 
     /// Side-by-side diff = two editors in one rounded island: left is the read-only base
@@ -4017,6 +4644,12 @@ impl Kyde {
                             }),
                         ));
                 }
+                // Git History for this path (recursive for a folder, file-scoped for a file).
+                let ph = p.clone();
+                panel = panel.child(item("Git History").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
+                ));
                 // Git remote ops, WebStorm-style: Fetch/Pull always, Push when ahead.
                 panel = panel
                     .child(item("Fetch").on_mouse_down(
