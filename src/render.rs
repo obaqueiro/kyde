@@ -251,6 +251,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_actions))
             .on_action(cx.listener(Self::act_new_scratch))
             .on_action(cx.listener(Self::act_delete_file))
+            .on_action(cx.listener(Self::act_close_tab))
             .on_action(cx.listener(Self::act_save))
             .on_action(cx.listener(Self::act_commit))
             .on_action(cx.listener(Self::act_mode_commit))
@@ -258,6 +259,8 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::open_recent_project))
             .on_action(cx.listener(Self::act_open_project))
+            .on_action(cx.listener(Self::act_diff_next))
+            .on_action(cx.listener(Self::act_diff_prev))
             .on_action(cx.listener(Self::act_toggle_fps))
             .on_action(cx.listener(Self::act_escape))
             .on_action(cx.listener(Self::act_clear_data))
@@ -1197,16 +1200,14 @@ impl Kyde {
                 }),
             );
         let pushing = self.pushing;
-        let push_btn = btn_primary("push", if pushing { "Pushing…" } else { "Push" })
-            .py_2()
-            .font_weight(FontWeight::SEMIBOLD)
-            .when(pushing, |d| {
-                d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.do_push(cx)),
-            );
+        let push_btn =
+            btn_primary_state("push", if pushing { "Pushing…" } else { "Push" }, pushing)
+                .py_2()
+                .font_weight(FontWeight::SEMIBOLD)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.do_push(cx)),
+                );
         let bar = div()
             .flex()
             .flex_row()
@@ -2084,6 +2085,7 @@ impl Kyde {
                 .child(div().relative().flex_1().min_w_0().h_full().child(inner))
                 .children(h_bar)
                 .children(scrollbar)
+                .children(self.render_diff_nav(cx))
                 .into_any_element();
         }
 
@@ -2158,7 +2160,83 @@ impl Kyde {
             .child(right)
             .children(h_bar)
             .children(scrollbar)
+            .children(self.render_diff_nav(cx))
             .into_any_element()
+    }
+
+    /// A small floating control at the diff's top-right: the change count + prev/next arrows
+    /// that jump between hunks. Shown whenever the current diff has at least one change.
+    fn render_diff_nav(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let n = self
+            .current_diff
+            .as_ref()
+            .map(|d| d.hunks.len())
+            .unwrap_or(0);
+        // Nothing to navigate with a single (or zero) change — hide the control.
+        if n < 2 {
+            return None;
+        }
+        let t = theme::get();
+        let ui = theme::font::UI_FAMILY;
+        let label = format!("{n} changes");
+        let arrow = |id: &'static str, icon: &'static str, tip: &'static str, next: bool| {
+            div()
+                .id(id)
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_light))
+                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.into())).into())
+                .child(svg().path(icon).size(px(14.0)).text_color(t.secondary_text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        this.diff_nav_hunk(next, cx);
+                    }),
+                )
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(8.0))
+                // Clear the 12px vertical scrollbar gutter on the right edge.
+                .right(px(16.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                // Swallow clicks on the control (label + padding included) so they don't reach
+                // the editor underneath and start a text selection.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .rounded_md()
+                .border_1()
+                .border_color(t.divider)
+                .bg(t.bg_mid)
+                .pl_2()
+                .pr_1()
+                .py_0p5()
+                .font_family(ui)
+                .text_size(px(t.ui_font_size))
+                .text_color(t.secondary_text)
+                .child(div().mr_1().child(label))
+                .child(arrow(
+                    "diff-prev",
+                    "icons/arrow-up.svg",
+                    "Previous change",
+                    false,
+                ))
+                .child(arrow(
+                    "diff-next",
+                    "icons/arrow-down.svg",
+                    "Next change",
+                    true,
+                ))
+                .into_any_element(),
+        )
     }
 
     /// A vertical scrollbar thumb overlaid on the right edge of the diff island, driven by
@@ -2224,6 +2302,9 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    // Don't let the editor/tree underneath also handle this — it would start a
+                    // text selection / move the caret behind the scrollbar.
+                    cx.stop_propagation();
                     this.sb_drag = Some(crate::SbDrag {
                         handle: sc.clone(),
                         horizontal: false,
@@ -2240,6 +2321,9 @@ impl Kyde {
                 .bottom_0()
                 .right_0()
                 .w(px(BAR))
+                // Swallow clicks anywhere in the scrollbar gutter (track included) so they never
+                // reach the editor underneath and start a text selection.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(thumb)
                 .into_any_element(),
         )
@@ -2302,6 +2386,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    cx.stop_propagation();
                     this.sb_drag = Some(crate::SbDrag {
                         handle: sc.clone(),
                         horizontal: true,
@@ -2318,6 +2403,7 @@ impl Kyde {
                 .right_0()
                 .bottom_0()
                 .h(px(BAR))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(thumb)
                 .into_any_element(),
         )
@@ -2344,21 +2430,17 @@ impl Kyde {
         // Emphasized primary CTA: standard primary button + taller pad + semibold. While a
         // commit is in flight it's dimmed + labelled "Committing…" (clicks are no-ops).
         let committing = self.committing;
-        let commit_btn = btn_primary(
+        let commit_btn = btn_primary_state(
             "commit",
             if committing {
                 "Committing…"
             } else {
                 "Commit"
             },
+            committing,
         )
         .py_2()
         .font_weight(FontWeight::SEMIBOLD)
-        // Pin hover opacity too — btn_primary's built-in `hover(opacity 0.9)` would otherwise
-        // undo the dimmed/disabled look the moment you hover.
-        .when(committing, |d| {
-            d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
-        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| {
@@ -3132,6 +3214,7 @@ impl Kyde {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
                         let cursor = if horizontal {
                             f32::from(e.position.x)
                         } else {
@@ -4274,7 +4357,10 @@ impl Kyde {
                     .flex()
                     .flex_col()
                     .children(rows),
-            );
+            )
+            // Clicks inside the panel must not reach the backdrop (which would close the finder
+            // right after a row's handler ran — breaking palette actions that re-open a finder).
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
         overlay(cx, true).child(modal).into_any_element()
     }
@@ -5491,15 +5577,16 @@ impl Kyde {
                     ),
             )
             .child(
-                btn_primary("push", if self.pushing { "Pushing…" } else { "Push" })
-                    .py_1p5()
-                    .when(self.pushing, |d| {
-                        d.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_push(cx)),
-                    ),
+                btn_primary_state(
+                    "push",
+                    if self.pushing { "Pushing…" } else { "Push" },
+                    self.pushing,
+                )
+                .py_1p5()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.do_push(cx)),
+                ),
             );
 
         let mut panel = div()
@@ -6429,18 +6516,33 @@ fn btn_primary(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
+    btn_primary_state(id, label, false)
+}
+
+/// `btn_primary` with an explicit `disabled` state. gpui allows only ONE `.hover()` per
+/// element (a second one panics: "hover style already set"), so the disabled look — dimmed,
+/// and *staying* dimmed on hover — must be baked into the single hover here rather than
+/// chained on by the caller.
+fn btn_primary_state(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    disabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
-    div()
+    let b = div()
         .id(id)
         .px_4()
         // 4px (was 6px) vertical pad → ~4px shorter button universally.
         .py_1()
         .rounded_md()
         .bg(t.primary)
-        .text_color(t.primary_text)
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.9))
-        .child(label.into())
+        .text_color(t.primary_text);
+    let b = if disabled {
+        b.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
+    } else {
+        b.cursor_pointer().hover(|s| s.opacity(0.9))
+    };
+    b.child(label.into())
 }
 
 /// Linearly interpolate two `0xRRGGBB` colors (`t` in 0..1) → opaque `Rgba`. Used for the

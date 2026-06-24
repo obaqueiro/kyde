@@ -88,8 +88,14 @@ impl Kyde {
         });
         // No placeholder: an empty open file should read as empty, not show prompt text.
         let file_editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
-        // Diff panes: left read-only (base), right editable (working copy, live-saves).
-        let diff_left = cx.new(|cx| CodeEditor::read_only(cx, String::new(), Lang::PlainText));
+        // Diff panes: left read-only (base), right editable (working copy, live-saves). The
+        // base pane renders its line numbers on the RIGHT, toward the center gutter, so the
+        // two panes' numbers meet in the middle (IntelliJ/GitHub side-by-side style).
+        let diff_left = cx.new(|cx| {
+            let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
+            e.gutter_right = true;
+            e
+        });
         let diff_right = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
         cx.subscribe(&diff_right, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) && this.diff_right.read(cx).dirty {
@@ -786,6 +792,69 @@ impl Kyde {
         }
         self.recompute_diff(&content, cx);
         self.exit_commit_if_clean();
+    }
+
+    /// Alt+↓ — jump to the next changed region in the diff.
+    pub(crate) fn act_diff_next(
+        &mut self,
+        _: &crate::DiffNextChange,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.diff_nav_hunk(true, cx);
+    }
+
+    /// Alt+↑ — jump to the previous changed region in the diff.
+    pub(crate) fn act_diff_prev(
+        &mut self,
+        _: &crate::DiffPrevChange,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.diff_nav_hunk(false, cx);
+    }
+
+    /// Display-row index where each hunk begins (in the aligned two-pane layout). Drives the
+    /// diff's change count + the prev/next navigation.
+    fn diff_hunk_rows(&self) -> Vec<usize> {
+        let Some(d) = self.current_diff.as_ref() else {
+            return Vec::new();
+        };
+        crate::aligned_rows(d)
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.hunk_start)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Jump the diff to the next (`next`) or previous changed region, wrapping around. The
+    /// anchor is the hunk currently scrolled to the top (`load_diff_panes` parks each hunk
+    /// `SCROLL_CONTEXT_ROWS` below the viewport top, so we add that back).
+    pub(crate) fn diff_nav_hunk(&mut self, next: bool, cx: &mut Context<Self>) {
+        let rows = self.diff_hunk_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let lh = editor::line_height_px();
+        let top = (-f32::from(self.diff_scroll.offset().y) / lh).round() as i64;
+        let anchor = top + SCROLL_CONTEXT_ROWS as i64;
+        let target = if next {
+            rows.iter()
+                .copied()
+                .find(|&r| (r as i64) > anchor)
+                .unwrap_or(rows[0]) // past the last → wrap to the first
+        } else {
+            rows.iter()
+                .copied()
+                .rev()
+                .find(|&r| (r as i64) < anchor)
+                .unwrap_or_else(|| *rows.last().unwrap()) // before the first → wrap to the last
+        };
+        let row = target.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
+        self.diff_scroll
+            .set_offset(gpui::point(gpui::px(0.0), gpui::px(-row * lh)));
+        cx.notify();
     }
 
     /// Re-read git + the open file from disk. Triggered when the window regains focus,
@@ -2931,6 +3000,16 @@ impl Kyde {
     pub(crate) fn act_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
         self.save_open(cx);
         cx.notify();
+    }
+    /// ⌘W — close the active editor tab (no-op when nothing is open).
+    pub(crate) fn act_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(idx) = self
+            .open_path
+            .as_ref()
+            .and_then(|p| self.open_tabs.iter().position(|t| t == p))
+        {
+            self.close_tab(idx, cx);
+        }
     }
     pub(crate) fn act_commit(&mut self, _: &DoCommit, _: &mut Window, cx: &mut Context<Self>) {
         // ⌘K opens the git view with the current file selected (the actual commit happens

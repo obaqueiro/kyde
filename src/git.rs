@@ -148,15 +148,15 @@ impl Repo {
         Ok(files)
     }
 
-    /// Worktree (HEAD or index) version of a file = the "before" side of the diff.
-    /// Returns the staged blob if present, else HEAD.
+    /// HEAD version of a file = the "before" side of the commit diff. We compare the working
+    /// tree against HEAD (not the index) so the diff always shows the *full* change that will
+    /// be committed — `commit_now` re-stages each checked file's working copy before
+    /// committing, so working-vs-HEAD is exactly the committed delta. Using the index instead
+    /// would render an empty diff for any file that's already fully staged. A file absent from
+    /// HEAD (newly added) has no base → empty string (all-added).
     pub fn base_content(&self, rel: &Path) -> Result<String> {
-        // `:path` = index version; fall back to HEAD.
         let p = rel.to_string_lossy();
-        match git(&self.root, &["show", &format!(":{}", p)]) {
-            Ok(s) => Ok(s),
-            Err(_) => git(&self.root, &["show", &format!("HEAD:{}", p)]).or(Ok(String::new())),
-        }
+        git(&self.root, &["show", &format!("HEAD:{}", p)]).or(Ok(String::new()))
     }
 
     /// Current on-disk content = the "after" side. Errors if the file is binary

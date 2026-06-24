@@ -61,7 +61,10 @@ actions!(
         ToggleTerminal,
         NewTerminalTab,
         ClearTerminal,
-        DeleteFile
+        DeleteFile,
+        CloseTab,
+        DiffNextChange,
+        DiffPrevChange
     ]
 );
 // File-finder navigation (fixed keys, context "FileFinder").
@@ -187,8 +190,17 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     // "Kyde" context, NOT globally, so the deeper editor/commit-box/terminal Backspace
     // bindings win whenever one of those is focused — this only fires at the app root.
     cx.bind_keys([KeyBinding::new("backspace", DeleteFile, Some("Kyde"))]);
+    // Jump between diff changes (Alt+↓ / Alt+↑). Global so they fire while the diff editor is
+    // focused; no-op when no diff is showing.
+    cx.bind_keys([
+        KeyBinding::new("alt-down", DiffNextChange, None),
+        KeyBinding::new("alt-up", DiffPrevChange, None),
+    ]);
     // Standard quit shortcut (not user-configurable).
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    // Close the active editor tab (standard ⌘W; not user-configurable). Global (no context) so
+    // it fires no matter what's focused — editor, tree, commit box, terminal.
+    cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None)]);
     // Toggle the bottom terminal panel (fixed key, IDE-standard); ⌘T = new tab while the
     // terminal is focused (scoped to its key context so it doesn't shadow elsewhere).
     #[cfg(feature = "terminal")]

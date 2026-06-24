@@ -22,6 +22,8 @@ pub(super) struct Prepaint {
     gutter_w: Pixels,
     /// Width of the line-number sub-column within `gutter_w` (0 if no numbers).
     num_w: Pixels,
+    /// Gutter rendered on the right of the text (diff base pane) instead of the left.
+    gutter_right: bool,
     caret: Option<gpui::PaintQuad>,
     /// Display row of the caret, for the current-line background highlight.
     caret_row: Option<usize>,
@@ -309,19 +311,36 @@ impl Element for EditorElement {
             }
         }
         let display_rows = line_starts.len();
-        let text_x = bounds.left() + gutter_w;
+        // Gutter on the left (default) or right (diff base pane). `gutter_x` is the gutter
+        // region's left edge; numbers occupy `[gutter_x, gutter_x+num_w]`, fold chevrons the
+        // rest; the text sits on the opposite side. A right gutter is pinned to the viewport's
+        // right edge (matches the paint phase) so it stays against the center gutter.
+        let gutter_right = editor.gutter_right;
+        let gutter_x = if gutter_right {
+            clip.right() - gutter_w
+        } else {
+            bounds.left()
+        };
+        let text_x = if gutter_right {
+            bounds.left()
+        } else {
+            bounds.left() + gutter_w
+        };
         // Reserve a hitbox over the line-number column so paint can give it the default arrow
         // cursor (the editor body is I-beam). `insert_hitbox` is only valid during prepaint.
-        let num_x = bounds.left() + num_w;
+        let num_x = gutter_x + num_w;
         let gutter_hitbox = (gutter_w > px(0.0)).then(|| {
-            let b = Bounds::from_corners(bounds.origin, point(num_x, bounds.bottom()));
+            let b =
+                Bounds::from_corners(point(gutter_x, bounds.top()), point(num_x, bounds.bottom()));
             window.insert_hitbox(b, gpui::HitboxBehavior::Normal)
         });
         // The fold-chevron sub-column [num_w, gutter_w) is clickable (toggles folds) → give it
         // a pointer cursor so it reads as interactive.
         let fold_hitbox = (gutter_w > num_w).then(|| {
-            let b =
-                Bounds::from_corners(point(num_x, bounds.top()), point(text_x, bounds.bottom()));
+            let b = Bounds::from_corners(
+                point(num_x, bounds.top()),
+                point(gutter_x + gutter_w, bounds.bottom()),
+            );
             window.insert_hitbox(b, gpui::HitboxBehavior::Normal)
         });
 
@@ -398,6 +417,7 @@ impl Element for EditorElement {
             gutter,
             gutter_w,
             num_w,
+            gutter_right,
             caret,
             caret_row,
             selections,
@@ -433,12 +453,26 @@ impl Element for EditorElement {
             cx,
         );
         let lh = pre.line_height;
-        let text_x = bounds.left() + pre.gutter_w;
+        // Gutter on the right (diff base pane) leaves text flush left; otherwise text is shifted
+        // right past the gutter.
+        let text_x = if pre.gutter_right {
+            bounds.left()
+        } else {
+            bounds.left() + pre.gutter_w
+        };
 
         // Visible band (+ overscan) so the per-row paint loops below stay O(visible), not
         // O(file size) — shaping a line number for every row of a 15k-line file each frame
         // was the big-file paint lag.
         let clip = window.content_mask().bounds;
+        // A right gutter is PINNED to the viewport's right edge (it doesn't scroll with the
+        // text), so the base pane's numbers always sit against the center gutter. A left gutter
+        // is content-relative at the element's left edge.
+        let gutter_x = if pre.gutter_right {
+            clip.right() - pre.gutter_w
+        } else {
+            bounds.left()
+        };
         let vis_top = clip.origin.y - lh * 12.0;
         let vis_bottom = clip.origin.y + clip.size.height + lh * 12.0;
         let on_screen = |i: usize| {
@@ -520,8 +554,10 @@ impl Element for EditorElement {
         for sel in pre.selections.drain(..) {
             window.paint_quad(sel);
         }
-        // Line numbers, right-aligned in their column.
-        if line_numbers && pre.num_w > px(0.0) {
+        // Line numbers, right-aligned in their column. A LEFT gutter paints here (before the
+        // text — they don't overlap). A RIGHT (pinned) gutter paints AFTER the text instead,
+        // with an opaque backing, so scrolled text passes underneath it — see below.
+        if !pre.gutter_right && line_numbers && pre.num_w > px(0.0) {
             let style = window.text_style();
             let font = style.font();
             let font_size = style.font_size.to_pixels(window.rem_size());
@@ -551,25 +587,20 @@ impl Element for EditorElement {
                     .text_system()
                     .shape_line(label.into(), font_size, &runs, None);
                 let y = bounds.top() + lh * i as f32;
-                // Numbers occupy the left sub-column [0, num_w); right-align within it. Sit
-                // closer to the code when there's no fold-chevron column to separate them.
-                let pad = if pre.gutter_w > pre.num_w {
-                    px(6.0)
-                } else {
-                    px(3.0)
-                };
-                let x = bounds.left() + pre.num_w - pad - shaped.width;
+                // Numbers occupy the sub-column `[gutter_x, gutter_x+num_w)`; right-align
+                // within it. Sit closer to the code when there's no fold-chevron column.
+                // Equal padding on both sides of the number (the column reserves 2×6px), so
+                // the numbers sit equidistant from the text and the center gutter in both panes.
+                let pad = px(6.0);
+                let x = gutter_x + pre.num_w - pad - shaped.width;
                 let _ = shaped.paint(point(x, y), lh, window, cx);
             }
         }
-        // Divider between the gutter (line numbers + fold chevrons) and the text.
-        if pre.gutter_w > px(0.0) {
-            let pad = if pre.gutter_w > pre.num_w {
-                px(6.0)
-            } else {
-                px(3.0)
-            };
-            let x = text_x - pad;
+        // Divider between a LEFT gutter and the text (the right-gutter divider is drawn in the
+        // pinned block after the text). Hug the text (1px in) so the right-aligned number keeps
+        // its full `pad` of clear space on the text side instead of sitting on the divider.
+        if !pre.gutter_right && pre.gutter_w > px(0.0) {
+            let x = text_x - px(1.0);
             window.paint_quad(fill(
                 Bounds::new(
                     point(x, bounds.top()),
@@ -618,12 +649,7 @@ impl Element for EditorElement {
                 // Chevron column sits right of the line numbers; `num_w + 2` leaves a couple
                 // px of padding before the divider (at `text_x - 6`, the fold column is wider
                 // than the glyph).
-                let _ = shaped.paint(
-                    point(bounds.left() + pre.num_w + px(2.0), y),
-                    lh,
-                    window,
-                    cx,
-                );
+                let _ = shaped.paint(point(gutter_x + pre.num_w + px(2.0), y), lh, window, cx);
                 if folded {
                     // `⋯` just past the end of the collapsed line's text.
                     let ell = [TextRun {
@@ -644,6 +670,70 @@ impl Element for EditorElement {
                     }
                 }
             }
+        }
+        // Pinned RIGHT gutter (diff base pane): drawn AFTER the text so scrolled-under code is
+        // hidden by an opaque per-row backing, against the viewport's right edge. Per-row bg
+        // keeps the hunk tint / filler separator showing in the gutter, matching the left pane.
+        if pre.gutter_right && line_numbers && pre.num_w > px(0.0) {
+            let t = theme::get();
+            let pad = px(6.0);
+            // Backing + divider start at the number column's text-facing edge (`gutter_x`), so
+            // the number keeps the same `pad` clearance on the code side as the right pane's
+            // number does — no extra space.
+            let left = gutter_x;
+            let filler_bg = t.diff_separator_bg;
+            let style = window.text_style();
+            let font = style.font();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let dim: Hsla = t.line_number.into();
+            let bright: Hsla = t.text.into();
+            for (i, &b) in pre.visible_lines.iter().enumerate() {
+                if !on_screen(i) {
+                    continue;
+                }
+                let y = bounds.top() + lh * i as f32;
+                // Row backing: the line's tint (or the filler separator) when present, else the
+                // pane bg — covers any code that scrolled under the pinned gutter.
+                let bg = if b == usize::MAX {
+                    filler_bg
+                } else {
+                    line_bg.get(&b).copied().unwrap_or(t.main_bg)
+                };
+                window.paint_quad(fill(
+                    Bounds::from_corners(point(left, y), point(clip.right(), y + lh)),
+                    bg,
+                ));
+                if b == usize::MAX {
+                    continue; // filler row → no number
+                }
+                let color = if line_bg.contains_key(&b) {
+                    bright
+                } else {
+                    dim
+                };
+                let label = (b + 1).to_string();
+                let runs = [TextRun {
+                    len: label.len(),
+                    font: font.clone(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                let shaped = window
+                    .text_system()
+                    .shape_line(label.into(), font_size, &runs, None);
+                let x = gutter_x + pre.num_w - pad - shaped.width;
+                let _ = shaped.paint(point(x, y), lh, window, cx);
+            }
+            // Divider on the gutter's text-facing edge.
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(left, clip.origin.y),
+                    gpui::size(px(1.0), clip.size.height),
+                ),
+                t.divider,
+            ));
         }
         // Caret-follow scrolling: a caret/selection move (keyboard nav, or a find-match
         // selection while the find box — not the editor — is focused) set `reveal_pending`.

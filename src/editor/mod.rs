@@ -206,6 +206,10 @@ pub struct CodeEditor {
     /// Width of the line-number sub-column (left part of `gutter_w`); the fold chevron
     /// column sits to its right, so a click in `[num_w, gutter_w)` toggles a fold.
     num_w: Pixels,
+    /// Render the gutter (line numbers + fold column) on the RIGHT of the text instead of
+    /// the left. Used by the diff's left/base pane so its line numbers sit toward the center
+    /// gutter (IntelliJ/GitHub side-by-side style); the right pane keeps numbers on the left.
+    pub gutter_right: bool,
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     /// The parent scroll container's handle (set by the embedding view via
@@ -308,6 +312,7 @@ impl CodeEditor {
             visible_lines: Vec::new(),
             gutter_w: px(0.0),
             num_w: px(0.0),
+            gutter_right: false,
             bounds: None,
             line_height: px(16.0),
             scroll: None,
@@ -892,8 +897,14 @@ impl CodeEditor {
         // of moving the caret.
         if self.gutter_w > px(0.0) {
             if let Some(bounds) = self.bounds {
-                // The chevron column is the part of the gutter right of the line numbers.
-                let rel_x = ev.position.x - bounds.left();
+                // The chevron column is the part of the gutter just past the line numbers.
+                // With the gutter on the right (diff base pane) it sits at the far right.
+                let gutter_left = if self.gutter_right {
+                    bounds.size.width - self.gutter_w
+                } else {
+                    px(0.0)
+                };
+                let rel_x = ev.position.x - bounds.left() - gutter_left;
                 if rel_x >= self.num_w && rel_x < self.gutter_w && !self.line_layouts.is_empty() {
                     let rel_y = (ev.position.y - bounds.top()).max(px(0.0));
                     let dr = ((f32::from(rel_y) / f32::from(self.line_height)).floor() as usize)
@@ -1194,9 +1205,15 @@ impl CodeEditor {
             return (self.line_starts[last] + line_len).min(self.content.len());
         }
         let dr = raw_dr.min(last);
-        // Text is shifted right by the fold gutter; map back before locating x. `line_layouts`
-        // is sparse but the clicked row is on-screen, so it's present; fall back to col 0.
-        let x = pos.x - bounds.left() - self.gutter_w;
+        // Map the click x into text-local space. Left gutter shifts text right by `gutter_w`;
+        // a right gutter leaves text flush at the left edge. `line_layouts` is sparse but the
+        // clicked row is on-screen, so it's present; fall back to col 0.
+        let text_left = if self.gutter_right {
+            px(0.0)
+        } else {
+            self.gutter_w
+        };
+        let x = pos.x - bounds.left() - text_left;
         let col = self
             .line_layouts
             .get(&dr)

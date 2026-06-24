@@ -147,6 +147,18 @@ cargo build           # compiles clean
 cargo test            # highlight/diff/git logic tests
 cargo run -- /path/to/any/git/repo
 ```
+**Fast iteration when rebuilding just to click/screenshot-test:** build DEBUG with slim
+features, run that binary — don't `--release` + clippy every loop. `[profile.release]` is
+`lto = "thin"` + `codegen-units = 1` + `opt-level = 3` (40s–5min); `default = ["full", …]`
+compiles every tree-sitter grammar (~18MB `.rodata`, the bulk of compile time). So:
+```sh
+cargo build --no-default-features --features terminal,rust,json && ./target/debug/kyde /path/to/repo
+```
+`[profile.dev]` is `opt-level = 1`, no LTO — gpui is fast enough in debug for UI testing. Add a
+grammar to `--features` only when testing that language. Use `cargo check` for compile-verify
+between edits. Run `cargo fmt` + `clippy` + `test` ONCE at the end (CI = fmt + clippy + test),
+not per iteration; a default/release build is only for perf claims or shipping.
+
 Smoke-tested: launches, renders, no panic. NOTE: `screencapture` of the window fails
 silently unless the terminal has macOS Screen-Recording permission (System Settings →
 Privacy & Security → Screen Recording) — grant it if you want to script screenshots.
