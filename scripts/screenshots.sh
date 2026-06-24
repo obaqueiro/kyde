@@ -73,10 +73,13 @@ else
     BIN="$ROOT/target/debug/kyde"
 fi
 
-echo "==> generating FPS fixture"
-mkdir -p "$FIX"
-python3 "$ROOT/scripts/gen_lock.py" "$LOCK" 37000 >/dev/null
-LOCK_REL="${LOCK#$ROOT/}"
+# Only the (manual) `fps` shot uses the big package-lock fixture; skip it for the automated set.
+if [ "${1:-all}" = fps ]; then
+    echo "==> generating FPS fixture"
+    mkdir -p "$FIX"
+    python3 "$ROOT/scripts/gen_lock.py" "$LOCK" 37000 >/dev/null
+    LOCK_REL="${LOCK#$ROOT/}"
+fi
 
 # git-diff fixture: a throwaway repo with one committed Rust file, then a working-tree edit,
 # so the git-diff shot always has a real side-by-side diff to render (the live repo is often
@@ -128,9 +131,7 @@ shoot() {
     local out="$OUT/$outfile"
     echo "==> $name → $outfile"
 
-    local fpsfile="$CFG_ROOT/fps-$name"
-    rm -f "$fpsfile"
-    env XDG_CONFIG_HOME="$CFG" KYDE_SHOT="$name" KYDE_FPS_FILE="$fpsfile" "$@" "$BIN" "$ROOT" >/dev/null 2>&1 &
+    env XDG_CONFIG_HOME="$CFG" KYDE_SHOT="$name" "$@" "$BIN" "$ROOT" >/dev/null 2>&1 &
     local pid=$!
 
     # rollback / plugins-window open a second (modal) window; everything else has just one.
@@ -152,8 +153,7 @@ shoot() {
     sleep 1  # let the hide settle + async layout / modal open / first paint settle
 
     # Fix the capture target now the window exists (window id for full-bleed; largest-window
-    # rect for a modal-over-main shot). Computing it up front means the gated grab below can
-    # fire the *instant* fps clears the floor, with minimal lag between reading and pixels.
+    # rect for a modal-over-main shot).
     local lines; lines="$(swift "$WINID" "$pid" 2>/dev/null)"
     local id rect
     id="$(printf '%s\n' "$lines" | head -1 | awk '{print $1}')"
@@ -173,34 +173,17 @@ shoot() {
         rm -f "$tmp"; return 1
     }
 
-    local target="${KYDE_MIN_FPS:-0}" fps=0
-    if [ "$target" != 0 ]; then
-        # Gated (fps shot): the FPS EMA fluctuates around the display cap, so capture the frame
-        # the moment the *live* reading clears the floor AND the grab succeeds — the grabbed
-        # pixels then actually show >floor. Never both within the window → return 1 to retry.
-        local got=0 a=0
-        while [ $a -lt 160 ]; do
-            fps="$(cat "$fpsfile" 2>/dev/null || echo 0)"
-            if awk -v v="$fps" -v t="$target" 'BEGIN { exit !(v >= t) }' && grab; then
-                got=1; echo "    captured at ${fps}fps"; break
-            fi
-            sleep 0.05; a=$((a + 1))
-        done
-        if [ $got -eq 0 ]; then
-            echo "    !! never cleared ${target}fps (peak ${fps}) — retrying"
-            kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
-            return 1
-        fi
-    else
-        # Ungated: settle on stability (the display cap, whatever it refreshes at), then grab.
-        local ftries=0 prev=0
-        while [ $ftries -lt 60 ]; do
-            fps="$(cat "$fpsfile" 2>/dev/null || echo 0)"
-            awk -v v="$fps" -v p="$prev" 'BEGIN { d = v - p; if (d < 0) d = -d; exit !(v >= 30 && d <= 1.0) }' && break
-            prev="$fps"
-            sleep 0.1; ftries=$((ftries + 1))
-        done
-        grab
+    # Grab the frame. `screencapture` can briefly fail with "could not create image from window"
+    # right after the window appears, so retry a few times before giving up on this launch.
+    local got=0 a=0
+    while [ $a -lt 20 ]; do
+        if grab; then got=1; break; fi
+        sleep 0.2; a=$((a + 1))
+    done
+    if [ $got -eq 0 ]; then
+        echo "    !! capture failed — retrying"
+        kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+        return 1
     fi
 
     kill "$pid" 2>/dev/null || true
@@ -209,27 +192,25 @@ shoot() {
 }
 
 # Map each README screenshot to its shot. (file ← state)
-declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal fps)
+# `fps` is intentionally NOT in the automated set — every other shot hides the FPS counter,
+# and the dedicated `fps` shot (the only one that still shows it) is run manually on demand:
+#   ./scripts/screenshots.sh fps
+declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
 want="${1:-all}"
 
-# EVERY shot is FPS-gated: the speed pitch is the whole point, so a screenshot only counts
-# if the live on-screen reading is at the floor the instant the pixels are grabbed (the gated
-# path in `shoot` fires the grab exactly when fps ≥ MIN_FPS). If a launch never clears the
-# floor within its window, `shoot` returns non-zero and we relaunch, up to MAX_TRIES.
-MIN_FPS="${KYDE_MIN_FPS:-120}"
-MAX_TRIES="${MAX_TRIES:-20}"
+MAX_TRIES="${MAX_TRIES:-5}"
 
-# shoot_until <shoot args…> — capture, retrying whole relaunches until one grabs at ≥MIN_FPS.
+# shoot_until <shoot args…> — capture, relaunching if a launch's window never appears or the
+# grab keeps failing, up to MAX_TRIES.
 shoot_until() {
     local n=0
-    # KYDE_MIN_FPS is a *shell-env* prefix read by `shoot`, not an app arg.
-    until KYDE_MIN_FPS="$MIN_FPS" shoot "$@"; do
+    until shoot "$@"; do
         n=$((n + 1))
         if [ "$n" -ge "$MAX_TRIES" ]; then
-            echo "    !! gave up after $n tries at ${MIN_FPS}fps — display may be capped lower"
+            echo "    !! gave up after $n tries"
             return 1
         fi
-        echo "    retry $n/$MAX_TRIES (need ≥${MIN_FPS}fps)…"
+        echo "    retry $n/$MAX_TRIES…"
         sleep 1
     done
 }

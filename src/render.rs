@@ -44,25 +44,13 @@ impl Render for Kyde {
                 }
             }
             self.fps_last = Some(now);
-            // Both the on-screen overlay and the harness file read `fps_shown`, snapshotted
-            // from the live EMA on a throttle. Keeping them one variable means the captured
-            // frame's number matches what the gate accepted. The throttle is LONG in shot mode
-            // (1.2s): `screencapture` takes ~200ms, and on the busier modal shots the EMA can
-            // jitter below the floor between writes — if the published value changed mid-grab,
-            // the gate's value and the grabbed pixels would diverge (a 120 gate freezing a 108
-            // shot). A 1.2s hold guarantees the value is stable across a whole capture, so a
-            // shot the gate accepts at ≥120 actually shows ≥120. Interactive use keeps the
-            // snappy ~5/sec cadence.
-            let shot_mode = std::env::var_os("KYDE_FPS_FILE").is_some();
-            let throttle = if shot_mode { 1.2 } else { 0.2 };
+            // The overlay reads `fps_shown`, snapshotted from the live EMA on a ~5/sec throttle
+            // so the number is readable rather than blurring every frame.
             let due = self
                 .fps_file_last
-                .is_none_or(|t| now.duration_since(t).as_secs_f32() >= throttle);
+                .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 0.2);
             if due {
                 self.fps_shown = self.fps_value;
-                if let Ok(p) = std::env::var("KYDE_FPS_FILE") {
-                    let _ = std::fs::write(&p, format!("{:.1}", self.fps_shown));
-                }
                 self.fps_file_last = Some(now);
             }
         }
@@ -222,13 +210,13 @@ impl Render for Kyde {
         // Right column = body (fills) with the terminal panel docked at its bottom. Keeping
         // the panel here (NOT a sibling of the full-height rail) means the rail spans the whole
         // window height, so its bottom-pinned terminal toggle stays put when the panel opens.
-        let right_col = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .child(body);
+        let right_col = div().flex().flex_col().flex_1().min_w_0().min_h_0();
+        // Maximized terminal hides the body (tree + editor) and fills the whole right column.
+        #[cfg(feature = "terminal")]
+        let term_max = self.term_open && self.repo_root.is_some() && self.term_maximized;
+        #[cfg(not(feature = "terminal"))]
+        let term_max = false;
+        let right_col = right_col.when(!term_max, |c| c.child(body));
         #[cfg(feature = "terminal")]
         let right_col = if self.term_open && self.repo_root.is_some() {
             right_col.child(self.render_terminal_panel(ui, cx))
@@ -269,6 +257,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_mode_browse))
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::open_recent_project))
+            .on_action(cx.listener(Self::act_open_project))
             .on_action(cx.listener(Self::act_toggle_fps))
             .on_action(cx.listener(Self::act_escape))
             .on_action(cx.listener(Self::act_clear_data))
@@ -389,6 +378,11 @@ impl Render for Kyde {
                 }),
             )
             .child(titlebar)
+            // Project tabs sit directly under the title bar, above all other UI — but only
+            // once more than one project is open.
+            .when(self.open_projects.len() > 1, |d| {
+                d.child(self.render_project_tabs(ui, cx))
+            })
             // Update-available banner sits directly under the titlebar (only when behind).
             .when(self.update_available.is_some(), |d| {
                 d.child(self.render_update_banner(ui, cx))
@@ -3529,6 +3523,91 @@ impl Kyde {
 
     /// Editor tab strip: one tab per open file, left→right in open order. Click activates,
     /// the `×` closes, right-click opens the tab context menu (close / others / to the right).
+    /// Project tabs strip: one pill per open project, above all other UI (under the title
+    /// bar). Click switches projects; the `×` closes one. Rendered only when >1 is open.
+    fn render_project_tabs(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let tabs = self.open_projects.iter().enumerate().map(|(i, root)| {
+            let active = self.repo_root.as_ref() == Some(root);
+            let name: SharedString = crate::projects::name_of(root).into();
+            let grp = SharedString::from(format!("projgrp-{i}"));
+            let close = div()
+                .id(SharedString::from(format!("project-close-{i}")))
+                .flex_none()
+                .w(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .text_size(px(15.0))
+                .text_color(t.line_number)
+                .hover(|d| d.bg(t.bg_light).text_color(t.text))
+                .when(!active, |d| {
+                    d.opacity(0.0).group_hover(grp.clone(), |s| s.opacity(1.0))
+                })
+                .child("×")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let root = root.clone();
+                        move |this, _e, _w, cx| {
+                            cx.stop_propagation();
+                            this.close_project(root.clone(), cx);
+                        }
+                    }),
+                );
+            div()
+                .id(SharedString::from(format!("project-tab-{i}")))
+                .group(grp.clone())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .h(px(28.0))
+                .flex_none()
+                .max_w(px(220.0))
+                .rounded_md()
+                .border_1()
+                .cursor_pointer()
+                .when(active, |d| {
+                    d.bg(gpui::rgba(0x3574F026)).border_color(t.primary)
+                })
+                .when(!active, |d| {
+                    d.border_color(gpui::rgba(0x00000000))
+                        .hover(|d| d.bg(t.bg_mid))
+                })
+                .text_color(if active { t.text } else { t.line_number })
+                .child(div().min_w_0().truncate().child(name))
+                .child(close)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let root = root.clone();
+                        move |this, _e, _w, cx| {
+                            if this.repo_root.as_ref() != Some(&root) {
+                                this.open_project(root.clone(), cx);
+                            }
+                        }
+                    }),
+                )
+        });
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .w_full()
+            .px_2()
+            .pb(px(theme::FRAME_GAP))
+            .bg(t.frame_bg)
+            .font_family(ui)
+            .text_size(px(t.ui_font_size))
+            .children(tabs)
+            .into_any_element()
+    }
+
     fn render_tab_bar(
         &self,
         ui: &'static str,
@@ -6080,6 +6159,76 @@ impl Kyde {
                     }),
                 ),
         );
+        // Spacer pushes the minimize + maximize/restore toggles to the right edge of the strip.
+        let maxed = self.term_maximized;
+        strip = strip
+            .child(div().flex_1().min_w_0())
+            // Minimize: hide the panel (reopen via the rail icon or ⌃`). A `−` glyph styled
+            // like the tree / commit-panel collapse buttons.
+            .child(
+                div()
+                    .id("term-minimize")
+                    .size(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_size(px(16.0))
+                    .text_color(t.line_number)
+                    .hover(|d| d.bg(t.bg_light).text_color(t.text))
+                    .cursor_pointer()
+                    .tooltip(move |_w, cx| cx.new(|_| Tip("Minimize terminal".into())).into())
+                    .child("−")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.term_open = false;
+                            this.term_maximized = false;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("term-maximize")
+                    .size(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    // Same colour + hover as the minimize button next to it.
+                    .text_color(t.line_number)
+                    .hover(|d| d.bg(t.bg_light).text_color(t.text))
+                    .cursor_pointer()
+                    .tooltip(move |_w, cx| {
+                        let label = if maxed {
+                            "Restore terminal"
+                        } else {
+                            "Maximize terminal"
+                        };
+                        cx.new(|_| Tip(label.into())).into()
+                    })
+                    .child(
+                        svg()
+                            .path(if maxed {
+                                "icons/minimize-2.svg"
+                            } else {
+                                "icons/maximize-2.svg"
+                            })
+                            .size(px(15.0))
+                            .text_color(t.line_number),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, window, cx| {
+                            this.term_maximized = !this.term_maximized;
+                            // Persist so the terminal reopens maximized next time.
+                            crate::save_ui_bool("terminal_maximized", this.term_maximized);
+                            this.focus_active_terminal(window, cx);
+                            cx.notify();
+                        }),
+                    ),
+            );
 
         // The active terminal widget (entity → element).
         let body = self
@@ -6114,14 +6263,21 @@ impl Kyde {
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .h(px(self.term_height))
+            // Maximized → fill the right column; otherwise a fixed, drag-resizable height.
+            .when(self.term_maximized, |d| d.flex_1().min_h_0())
+            .when(!self.term_maximized, |d| {
+                d.flex_none().h(px(self.term_height))
+            })
             // Inside the right column already (right of the full-height rail) → no left pad;
             // aligns with the body island above it.
             .pr(px(theme::FRAME_GAP))
+            // Maximized has no body above it, so it needs the top frame gap the body used to
+            // provide; docked mode gets its top spacing from the resize divider instead.
+            .when(self.term_maximized, |d| d.pt(px(theme::FRAME_GAP)))
             .pb(px(theme::FRAME_GAP))
             .bg(t.frame_bg)
-            .child(divider)
+            // No resize divider when maximized (it fills the column).
+            .when(!self.term_maximized, |d| d.child(divider))
             .child(island)
             .into_any_element()
     }

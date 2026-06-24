@@ -83,7 +83,53 @@ actions!(
     ]
 );
 // Native menu bar actions.
-actions!(kyde_menu, [Quit, ToggleFps, ClearData, OpenPlugins]);
+actions!(
+    kyde_menu,
+    [Quit, ToggleFps, ClearData, OpenPlugins, OpenProject]
+);
+
+/// The native macOS menu bar: the app menu (Settings/Plugins/Quit) + a File menu with
+/// "Open…" and a live "Recent Projects" submenu. Rebuilt whenever recents change (startup +
+/// each `open_project`) so the recent list stays current.
+fn app_menus(recents: &Recents) -> Vec<Menu> {
+    let recent_items: Vec<gpui::MenuItem> = recents
+        .paths
+        .iter()
+        .take(15)
+        .map(|p| {
+            gpui::MenuItem::action(
+                projects::name_of(p),
+                OpenRecentProject(p.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    let mut file_items = vec![MenuItem::action("Open…", OpenProject)];
+    if !recent_items.is_empty() {
+        file_items.push(MenuItem::separator());
+        file_items.push(MenuItem::submenu(Menu {
+            name: "Recent Projects".into(),
+            items: recent_items,
+        }));
+    }
+    vec![
+        Menu {
+            name: "Kyde".into(),
+            items: vec![
+                MenuItem::action("Settings…", OpenKeymap),
+                MenuItem::action("Plugins…", OpenPlugins),
+                MenuItem::action("Toggle FPS Monitor", ToggleFps),
+                MenuItem::separator(),
+                MenuItem::action("Clear Data & Restart…", ClearData),
+                MenuItem::separator(),
+                MenuItem::action("Quit Kyde", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            items: file_items,
+        },
+    ]
+}
 
 /// Dock-tile menu action: open a specific recent project by its path. Carries
 /// data, so it's a derived `Action` rather than a unit struct from `actions!`.
@@ -381,9 +427,26 @@ impl Render for Tip {
     }
 }
 
+/// Per-project UI state stashed when switching to another open-project tab, so switching back
+/// restores the project exactly as you left it (which file is open, the editor tabs, the tree
+/// expansion, the active mode). The *active* project's state lives in the `Kyde` fields
+/// directly; this only holds the inactive tabs' snapshots.
+struct ProjectSession {
+    mode: Mode,
+    open_path: Option<PathBuf>,
+    open_tabs: Vec<PathBuf>,
+    selected: Option<usize>,
+    expanded: std::collections::HashSet<PathBuf>,
+}
+
 struct Kyde {
     /// None = no project open → the Projects landing view.
     repo_root: Option<PathBuf>,
+    /// Roots of every open project, in tab order. The active one == `repo_root`. Project tabs
+    /// render only when this holds more than one. Empty ⇔ `repo_root` is None (landing view).
+    open_projects: Vec<PathBuf>,
+    /// Saved per-project UI state for the *inactive* tabs (keyed by root). See `ProjectSession`.
+    project_sessions: std::collections::HashMap<PathBuf, ProjectSession>,
     mode: Mode,
     focus_handle: FocusHandle,
     keymap: Keymap,
@@ -513,13 +576,11 @@ struct Kyde {
     /// FPS monitor (toggled from the Kyde menu): smoothed frames-per-second + last frame time.
     show_fps: bool,
     fps_value: f32,
-    /// Throttled snapshot of `fps_value` — the value the overlay displays AND the screenshot
-    /// harness reads from `KYDE_FPS_FILE`, kept identical so a gated capture's on-screen
-    /// number matches the value the gate accepted.
+    /// Throttled snapshot of `fps_value` — the value the overlay displays, held steady for a
+    /// readable beat rather than re-rendering a blurred number every frame.
     fps_shown: f32,
     fps_last: Option<std::time::Instant>,
-    /// Screenshot harness only: throttles the `KYDE_FPS_FILE` publish to ~5/sec so the disk
-    /// write doesn't itself drop frames (a per-frame syscall at 120fps perturbs the reading).
+    /// Throttle timer for the `fps_shown` snapshot (~5/sec).
     fps_file_last: Option<std::time::Instant>,
 
     // Overlays
@@ -691,6 +752,9 @@ struct Kyde {
     /// True while dragging the terminal panel's top divider.
     #[cfg(feature = "terminal")]
     term_resizing: bool,
+    /// When true the terminal fills the whole right column (tree + editor hidden).
+    #[cfg(feature = "terminal")]
+    term_maximized: bool,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -1106,19 +1170,35 @@ fn config_dir() -> PathBuf {
 fn ui_settings_path() -> PathBuf {
     config_dir().join("ui.json")
 }
-fn load_show_fps() -> bool {
+/// Read one boolean key from `ui.json` (missing file/key → `default`).
+fn load_ui_bool(key: &str, default: bool) -> bool {
     std::fs::read_to_string(ui_settings_path())
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("show_fps").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
+        .unwrap_or(default)
 }
-fn save_show_fps(v: bool) {
+/// Set one boolean key in `ui.json`, preserving the file's other keys (read-modify-write so
+/// e.g. saving the terminal pref never clobbers `show_fps`).
+fn save_ui_bool(key: &str, val: bool) {
     let p = ui_settings_path();
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&p, serde_json::json!({ "show_fps": v }).to_string());
+    let mut v = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(key.to_string(), serde_json::Value::Bool(val));
+    }
+    let _ = std::fs::write(&p, v.to_string());
+}
+fn load_show_fps() -> bool {
+    load_ui_bool("show_fps", false)
+}
+fn save_show_fps(v: bool) {
+    save_ui_bool("show_fps", v);
 }
 
 /// The app's standard checkbox: a small rounded square, filled with `check.svg` when ticked.
@@ -1344,6 +1424,8 @@ impl gpui::AssetSource for Assets {
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/x.svg" => include_bytes!("../assets/icons/x.svg"),
+            "icons/maximize-2.svg" => include_bytes!("../assets/icons/maximize-2.svg"),
+            "icons/minimize-2.svg" => include_bytes!("../assets/icons/minimize-2.svg"),
             "logo.png" => include_bytes!("../assets/logo.png"),
             _ => return Ok(None),
         };
@@ -1525,8 +1607,8 @@ fn set_dock_icon() {}
 /// the exact plugin install set it needs so highlighting / the install banner are
 /// deterministic regardless of any pre-existing config.
 fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context<Kyde>) {
-    // Every documented screenshot shows the FPS monitor (the speed pitch is the whole point).
-    view.show_fps = true;
+    // Screenshots hide the visible FPS counter — only the dedicated `fps` shot turns it on, in
+    // its own arm.
     // Force the install list to exactly `on` (everything else uninstalled), then persist.
     let set_packs = |view: &mut Kyde, on: &[&str]| {
         for id in ["rust", "json", "markdown", "typescript", "javascript"] {
@@ -1668,20 +1750,9 @@ fn main() {
         set_dock_icon();
         apply_keymap(cx, &km);
 
-        // Native macOS menu bar: Kyde → Settings… / Quit.
+        // Native macOS menu bar: app menu + File (Open / Recent Projects).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-        cx.set_menus(vec![Menu {
-            name: "Kyde".into(),
-            items: vec![
-                MenuItem::action("Settings…", OpenKeymap),
-                MenuItem::action("Plugins…", OpenPlugins),
-                MenuItem::action("Toggle FPS Monitor", ToggleFps),
-                MenuItem::separator(),
-                MenuItem::action("Clear Data & Restart…", ClearData),
-                MenuItem::separator(),
-                MenuItem::action("Quit Kyde", Quit),
-            ],
-        }]);
+        cx.set_menus(app_menus(&Recents::load()));
         // Dock right-click → "Recent Projects" submenu (refreshed on each open).
         cx.set_dock_menu(dock_menu(&Recents::load()));
 

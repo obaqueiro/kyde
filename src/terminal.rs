@@ -171,7 +171,10 @@ impl TerminalView {
                 }
             }
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
+                // Shell exited (e.g. `exit` / ^D) → close the tab, like hitting its ×. Kyde's
+                // subscription removes it and hides the panel when it was the last tab.
                 self.exited = true;
+                cx.emit(TerminalEvent::CloseRequested);
                 cx.notify();
                 return false;
             }

@@ -213,6 +213,9 @@ impl Kyde {
         .detach();
 
         let mut me = Self {
+            // A path arg opens straight into that project, so it's the first open tab.
+            open_projects: root.iter().cloned().collect(),
+            project_sessions: std::collections::HashMap::new(),
             repo_root: root,
             mode: Mode::Browse, // code-first: a freshly opened project shows the editor
             focus_handle: cx.focus_handle(),
@@ -367,6 +370,9 @@ impl Kyde {
             term_height: 260.0,
             #[cfg(feature = "terminal")]
             term_resizing: false,
+            // Restore the user's persisted "maximized terminal" preference.
+            #[cfg(feature = "terminal")]
+            term_maximized: crate::load_ui_bool("terminal_maximized", false),
         };
         me.refresh();
         // Background: ask GitHub if there's a newer release, then surface the update banner.
@@ -392,19 +398,94 @@ impl Kyde {
         Repo::discover(self.repo_root.as_ref()?).ok()
     }
 
-    /// Open a folder as the active project: record it in recents and load its status.
+    /// Open a folder as the active project (or switch to it if already open): record it in
+    /// recents, add a project tab, and load its state. Each open project is a tab above the
+    /// UI; switching preserves the one you're leaving (see `ProjectSession`).
     pub(crate) fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.recents.touch(&path);
         self.recents.save();
-        // Keep the Dock "Recent Projects" submenu in sync with the new order.
+        // Keep the Dock + menu-bar "Recent Projects" lists in sync with the new order.
         cx.set_dock_menu(dock_menu(&self.recents));
-        self.repo_root = Some(path);
-        self.mode = Mode::Browse; // open into the code view, not git
-        self.open_path = None;
-        self.open_tabs.clear();
-        self.selected = None;
-        self.expanded.insert(PathBuf::new()); // root folder visible by default
-        self.refresh();
+        cx.set_menus(crate::app_menus(&self.recents));
+        // Stash the project we're leaving so a later switch back restores it.
+        self.save_active_session();
+        if !self.open_projects.contains(&path) {
+            self.open_projects.push(path.clone());
+        }
+        self.load_project_state(path, cx);
+        cx.notify();
+    }
+
+    /// Snapshot the active project's UI state into `project_sessions` (no-op on the landing
+    /// view). Called before switching away so switching back restores it.
+    fn save_active_session(&mut self) {
+        if let Some(root) = self.repo_root.clone() {
+            self.project_sessions.insert(
+                root,
+                crate::ProjectSession {
+                    mode: self.mode,
+                    open_path: self.open_path.clone(),
+                    open_tabs: self.open_tabs.clone(),
+                    selected: self.selected,
+                    expanded: self.expanded.clone(),
+                },
+            );
+        }
+    }
+
+    /// Make `path` the active project, restoring its saved session if we have one (which file
+    /// was open, the editor tabs, tree expansion, mode) or starting fresh otherwise.
+    fn load_project_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.repo_root = Some(path.clone());
+        match self.project_sessions.remove(&path) {
+            Some(s) => {
+                self.mode = s.mode;
+                self.expanded = s.expanded;
+                self.open_tabs = s.open_tabs;
+                self.selected = s.selected;
+                self.refresh();
+                // Reload the file that was open into the editor; else leave it empty.
+                match s.open_path {
+                    Some(p) => self.open_file(p, cx),
+                    None => self.open_path = None,
+                }
+            }
+            None => {
+                self.mode = Mode::Browse; // open into the code view, not git
+                self.open_path = None;
+                self.open_tabs.clear();
+                self.selected = None;
+                self.expanded.clear();
+                self.expanded.insert(PathBuf::new()); // root folder visible by default
+                self.refresh();
+            }
+        }
+    }
+
+    /// Close an open-project tab. Switches to a neighbour if it was active; closing the last
+    /// one returns to the Projects landing view.
+    pub(crate) fn close_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let Some(idx) = self.open_projects.iter().position(|p| p == &root) else {
+            return;
+        };
+        let was_active = self.repo_root.as_ref() == Some(&root);
+        self.open_projects.remove(idx);
+        self.project_sessions.remove(&root);
+        if !was_active {
+            cx.notify();
+            return;
+        }
+        if self.open_projects.is_empty() {
+            // Back to the landing view.
+            self.repo_root = None;
+            self.open_path = None;
+            self.open_tabs.clear();
+            self.selected = None;
+        } else {
+            // Prefer the tab that shifted into this slot, else the previous one.
+            let next = self.open_projects[idx.min(self.open_projects.len() - 1)].clone();
+            self.load_project_state(next, cx);
+        }
         cx.notify();
     }
 
@@ -416,6 +497,16 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         self.open_project(PathBuf::from(&a.0), cx);
+    }
+
+    /// File → Open… — pick a folder and open it as a new project tab.
+    pub(crate) fn act_open_project(
+        &mut self,
+        _: &OpenProject,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_folder(cx);
     }
 
     /// Native folder picker for the "Open" / "New Project" buttons.
@@ -3099,7 +3190,11 @@ impl Kyde {
             if self.term_tabs.is_empty() {
                 self.new_terminal_tab(cx);
             }
+            // Open in the user's persisted maximized state.
+            self.term_maximized = crate::load_ui_bool("terminal_maximized", false);
             self.focus_active_terminal(window, cx);
+        } else {
+            self.term_maximized = false;
         }
         cx.notify();
     }
@@ -3146,6 +3241,7 @@ impl Kyde {
         self.term_tabs.remove(idx);
         if self.term_tabs.is_empty() {
             self.term_open = false;
+            self.term_maximized = false;
             self.term_active = 0;
         } else if self.term_active >= self.term_tabs.len() {
             self.term_active = self.term_tabs.len() - 1;
