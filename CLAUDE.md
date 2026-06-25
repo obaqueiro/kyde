@@ -248,6 +248,38 @@ UTF-8 bytes. Caret/selection painted in `prepaint`; layout cached in `paint` for
 vertical movement. Used for BOTH the file editor and the commit box (lang=PlainText).
 Remaining: undo/redo, soft-wrap, caret-follow scrolling, rope buffer for huge files.
 
+## Vim mode (src/editor/vim.rs)
+Opt-in Vim bindings on the **Browse file editor only** (never the commit box, single-line
+inputs, or diff panes). Toggled via the **Vim mode checkbox in the Settings screen**
+(`render_vim_mode_row` → `Kyde::toggle_vim`, flips + persists immediately on click — no pending
+state like the shell-command row), persisted in `ui.json` (`load_vim`/`save_vim`, key `"vim"`). `Kyde.vim_enabled`
+mirrors the editor flag for the status bar; the file editor is enabled at startup in `app.rs`
+`new` via `CodeEditor::set_vim_enabled`. The status bar shows a per-mode chip
+(`-- NORMAL/INSERT/VISUAL/V-LINE --`, `render_status_bar`), refreshed by a new
+`EditorEvent::VimModeChanged` the Kyde view subscribes to.
+- **State**: `CodeEditor.vim: vim::Vim` { `enabled`, `mode` (`VimMode` Normal/Insert/Visual/
+  VisualLine), `pending` (multi-key buffer), `register` + `register_linewise` (unnamed yank/
+  delete register), `visual_anchor`/`visual_caret` }. Inert while `!enabled` — a non-vim editor
+  behaves exactly as before.
+- **Keystroke gate**: `vim_key` is an `on_key_down` listener (registered BEFORE
+  `on_key_down_nav`, multi-line only). In Normal/Visual mode it interprets the key as a command
+  and calls `cx.stop_propagation()`, which makes gpui skip the OS input handler
+  (`window.rs`: `if !result.propagate { return }` before the IME path) so the key isn't typed.
+  Belt-and-suspenders: every mutation entry point (`replace_text_in_range`,
+  `replace_and_mark_text_in_range`, backspace/delete/enter/indent/outdent/delete_to_home/cut/
+  paste) early-returns when `vim_blocks_edit()` (enabled && mode != Insert).
+- **Parser** (pure, unit-tested — no gpui): `parse(buf) -> Parsed{Cmd|Pending|Invalid}` over the
+  pending buffer, with leading `[1-9][0-9]*` counts (`split_count`; a leading `0` is the
+  line-start motion). `Motion`/`Cmd`/`Op`/`InsertAt` enums; word-class helpers
+  (`word_forward`/`word_backward`/`word_end`, `class` with `big` for WORD). `CodeEditor` methods
+  below execute commands via `vim_replace` (bypasses the edit guard).
+- **Supported**: motions h/j/k/l/w/W/b/B/e/E/0/^/$/gg/G/{/} (+counts, arrows/Home/End/Enter/
+  Backspace); insert i/a/I/A/o/O; edits x/X/D/C/s/S/r<char>/J; operators d/c/y × {motion, doubled
+  dd/cc/yy} (cw acts like ce); p/P (charwise + linewise); u + Ctrl-r; Visual v / Visual-Line V
+  with motions + d/y/c/x; Esc → Normal (and cancels a pending command). Normal-mode caret rests
+  ON a char (`clamp_normal_caret`); a translucent **block cursor** is painted in `element.rs`
+  when `vim_block_cursor()`.
+
 ## Keymap / finder / onboarding (src/keymap.rs + main.rs)
 - `keymap.rs`: `Keymap { preset, overrides }` serialized to `~/.config/kyde/keymap.json`
   (XDG_CONFIG_HOME respected). `ACTIONS` table holds each configurable action's name +

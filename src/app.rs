@@ -87,7 +87,13 @@ impl Kyde {
             e
         });
         // No placeholder: an empty open file should read as empty, not show prompt text.
-        let file_editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
+        // Vim bindings (persisted in ui.json) apply to this editor only — never the commit
+        // box, single-line inputs, or diff panes.
+        let file_editor = cx.new(|cx| {
+            let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "");
+            e.set_vim_enabled(load_vim(), cx);
+            e
+        });
         // Diff panes: left read-only (base), right editable (working copy, live-saves). The
         // base pane renders its line numbers on the RIGHT, toward the center gutter, so the
         // two panes' numbers meet in the middle (IntelliJ/GitHub side-by-side style).
@@ -121,8 +127,11 @@ impl Kyde {
         // `dirty` so loading a file (set_content emits Changed with dirty=false) doesn't
         // rewrite it; real edits/undo set dirty=true and flush here.
         cx.subscribe(&file_editor, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.file_editor.read(cx).dirty {
-                this.autosave(cx);
+            match ev {
+                EditorEvent::Changed if this.file_editor.read(cx).dirty => this.autosave(cx),
+                // Vim mode switch → repaint the status-bar mode indicator.
+                EditorEvent::VimModeChanged => cx.notify(),
+                _ => {}
             }
         })
         .detach();
@@ -285,6 +294,7 @@ impl Kyde {
             find_idx: 0,
             diff_edit_gen: 0,
             finder_gen: 0,
+            vim_enabled: load_vim(),
             show_fps: load_show_fps(),
             fps_value: 0.0,
             fps_shown: 0.0,
@@ -2524,6 +2534,17 @@ impl Kyde {
         self.show_fps = !self.show_fps;
         self.fps_last = None;
         save_show_fps(self.show_fps); // remember across launches
+        cx.notify();
+    }
+
+    /// Toggle Vim bindings on the file editor + persist. Driven by the Vim-mode
+    /// checkbox in the Settings screen (`render_vim_mode_row`).
+    pub(crate) fn toggle_vim(&mut self, cx: &mut Context<Self>) {
+        let on = !self.vim_enabled;
+        self.vim_enabled = on;
+        save_vim(on);
+        self.file_editor
+            .update(cx, |e, cx| e.set_vim_enabled(on, cx));
         cx.notify();
     }
     /// Escape: close whatever overlay is open (most-transient first); if none, cancel the

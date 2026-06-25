@@ -88,7 +88,13 @@ actions!(
 // Native menu bar actions.
 actions!(
     kyde_menu,
-    [Quit, ToggleFps, ClearData, OpenPlugins, OpenProject]
+    [
+        Quit,
+        ToggleFps,
+        ClearData,
+        OpenPlugins,
+        OpenProject
+    ]
 );
 
 /// The native macOS menu bar: the app menu (Settings/Plugins/Quit) + a File menu with
@@ -585,6 +591,9 @@ struct Kyde {
     /// Bumped on every Find-in-Files keystroke; the debounced background `git grep` only
     /// applies its results when its captured generation still matches (drops stale searches).
     finder_gen: u64,
+    /// Vim bindings on the file editor (toggled from the Kyde menu; persisted in ui.json).
+    /// Mirrors the file editor's own flag so the status bar can read it without a borrow.
+    vim_enabled: bool,
     /// FPS monitor (toggled from the Kyde menu): smoothed frames-per-second + last frame time.
     show_fps: bool,
     fps_value: f32,
@@ -1211,6 +1220,13 @@ fn load_show_fps() -> bool {
 }
 fn save_show_fps(v: bool) {
     save_ui_bool("show_fps", v);
+}
+/// Whether the file editor uses Vim bindings (persisted across launches).
+fn load_vim() -> bool {
+    load_ui_bool("vim", false)
+}
+fn save_vim(v: bool) {
+    save_ui_bool("vim", v);
 }
 
 /// The app's standard checkbox: a small rounded square, filled with `check.svg` when ticked.

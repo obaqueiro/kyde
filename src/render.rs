@@ -4567,6 +4567,7 @@ impl Kyde {
                     .child(preset_card(Preset::VSCode, cx)),
             )
             .child(self.render_shell_command_row(cx))
+            .child(self.render_vim_mode_row(cx))
             // Single primary action, bottom-right: confirm the highlighted choice.
             .child(
                 div().flex().flex_row().justify_end().mt_2().child(
@@ -4694,11 +4695,80 @@ impl Kyde {
         col.into_any_element()
     }
 
+    /// Settings-screen toggle for Vim editing on the Browse file editor. Flips
+    /// immediately (and persists to ui.json) on click — unlike the shell-command
+    /// checkbox, there's no pending state to apply on Continue.
+    fn render_vim_mode_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let checked = self.vim_enabled;
+
+        let checkbox = div()
+            .size_4()
+            .rounded_sm()
+            .border_1()
+            .border_color(if checked { t.primary } else { t.bg_light })
+            .when(checked, |d| d.bg(t.primary))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(checked, |d| {
+                d.child(
+                    div()
+                        .text_color(gpui::white())
+                        .text_size(px(11.0))
+                        .child("✓"),
+                )
+            });
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .pt_3()
+            .mt_1()
+            .border_t_1()
+            .border_color(t.divider)
+            .cursor_pointer()
+            .child(checkbox)
+            .child(
+                div()
+                    .text_color(t.secondary_text)
+                    .child("Vim mode — Vim keybindings in the file editor"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.toggle_vim(cx)),
+            )
+            .into_any_element()
+    }
+
     /// Bottom status bar — currently just the branch switcher, anchored bottom-right.
     fn render_status_bar(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         // All bottom-bar text is this muted grey; icons keep their own colours.
         let bar_text = gpui::rgb(0x808289);
+
+        // Vim mode chip (only when Vim bindings are on): "NORMAL"/"INSERT"/"VISUAL", tinted
+        // per mode so the current mode reads at a glance.
+        let vim_label = self.file_editor.read(cx).vim_mode_label();
+        let vim_chip = vim_label.map(|label| {
+            let col = match label {
+                "INSERT" => t.status_added,
+                "VISUAL" | "V-LINE" => t.status_modified,
+                _ => t.primary,
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .px_1p5()
+                .rounded_md()
+                .bg(t.bg_light)
+                .text_color(col)
+                .child(SharedString::from(format!("-- {label} --")))
+        });
         let label = self
             .current_branch
             .clone()
@@ -4907,6 +4977,7 @@ impl Kyde {
                     .items_center()
                     .flex_none()
                     .gap_2()
+                    .when_some(vim_chip, |d, chip| d.child(chip))
                     // Only show Pull when we know we're behind (or one's in flight).
                     .when(self.behind.unwrap_or(0) > 0 || self.pulling, |d| {
                         d.child(pull_btn)

@@ -25,6 +25,9 @@ use unicode_segmentation::UnicodeSegmentation;
 mod element;
 use element::EditorElement;
 
+pub mod vim;
+use vim::Vim;
+
 /// Width of the fold gutter (chevron column) drawn left of the text, when the
 /// buffer has any foldable regions. Zero otherwise (single-line inputs, plain
 /// text with no grammar) so those editors look exactly as before.
@@ -119,6 +122,8 @@ pub fn bind_keys(cx: &mut App) {
 /// Emitted whenever the text changes (used by the file finder to re-query live).
 pub enum EditorEvent {
     Changed,
+    /// The Vim mode changed (Normal/Insert/Visual) — lets the parent repaint the status bar.
+    VimModeChanged,
 }
 
 /// A point-in-time editor state for the undo/redo stacks.
@@ -258,6 +263,9 @@ pub struct CodeEditor {
     /// so this pane lines up row-for-row with the other side. `filler_end` = trailing blanks.
     pub filler: std::collections::HashMap<usize, usize>,
     pub filler_end: usize,
+
+    /// Vim editing mode (inert unless `vim.enabled`; only the Browse file editor enables it).
+    vim: Vim,
 }
 
 impl CodeEditor {
@@ -334,6 +342,7 @@ impl CodeEditor {
             word_bg_color: gpui::rgba(0x00000000),
             filler: std::collections::HashMap::new(),
             filler_end: 0,
+            vim: Vim::default(),
         }
     }
 
@@ -362,6 +371,7 @@ impl CodeEditor {
         self.redo_stack.clear();
         self.last_edit = EditKind::Other;
         self.folded.clear();
+        self.vim_reset();
         self.recompute_folds(cx);
         cx.notify();
         cx.emit(EditorEvent::Changed);
@@ -771,23 +781,35 @@ impl CodeEditor {
         }
     }
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return; // handled as a Vim command in `vim_key`
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.prev_boundary(self.cursor()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return;
+        }
         self.replace_text_in_range(None, "\n", window, cx);
     }
     /// cmd-backspace: delete from the caret back to the start of the current line
     /// (or just delete the selection if there is one).
     fn delete_to_home(&mut self, _: &DeleteToHome, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return;
+        }
         if self.selected_range.is_empty() {
             let caret = self.cursor();
             let line_start = self.content[..caret]
@@ -800,7 +822,7 @@ impl CodeEditor {
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
+        if self.read_only || self.vim_blocks_edit() {
             return;
         }
         if self.selected_range.start == self.selected_range.end {
@@ -815,7 +837,7 @@ impl CodeEditor {
         }
     }
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.read_only {
+        if !self.read_only && !self.vim_blocks_edit() {
             self.shift_lines(false, cx);
         }
     }
@@ -874,6 +896,9 @@ impl CodeEditor {
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -882,6 +907,9 @@ impl CodeEditor {
         }
     }
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_blocks_edit() {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
             self.replace_text_in_range(None, &text, window, cx);
         }
@@ -1299,7 +1327,7 @@ impl EntityInputHandler for CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
+        if self.read_only || self.vim_blocks_edit() {
             return;
         }
         let range = range_utf16
@@ -1335,7 +1363,7 @@ impl EntityInputHandler for CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
+        if self.read_only || self.vim_blocks_edit() {
             return;
         }
         let range = range_utf16
@@ -1459,6 +1487,9 @@ impl Render for CodeEditor {
                     .on_action(cx.listener(Self::enter))
                     .on_action(cx.listener(Self::indent))
                     .on_action(cx.listener(Self::outdent))
+                    // Vim normal/visual command handling — must run first so it can
+                    // `stop_propagation` and suppress text insertion. A no-op when Vim is off.
+                    .on_key_down(cx.listener(Self::vim_key))
                     // Held ↑/↓ → accelerating auto-repeat (OS key-repeat wasn't moving).
                     .on_key_down(cx.listener(Self::on_key_down_nav))
                     .on_key_up(cx.listener(Self::on_key_up_nav))

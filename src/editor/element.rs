@@ -358,20 +358,44 @@ impl Element for EditorElement {
         }
         // The blinking caret itself only shows when focused — including on an empty field
         // (placeholder showing), so a focused input reads as focused.
-        if editor.focus_handle.is_focused(window) && sel.is_empty() && editor.blink_on {
+        // Vim Normal mode draws a solid (non-blinking) block over the char under the cursor;
+        // the insert/normal caret is the usual thin blinking bar.
+        let vim_block = editor.vim_block_cursor();
+        if editor.focus_handle.is_focused(window)
+            && sel.is_empty()
+            && (vim_block || editor.blink_on)
+        {
             let (li, start) = locate_in(&line_starts, &editor.content, cursor);
             if let Some(line) = lines.get(&li) {
                 let x = line.x_for_index(cursor - start);
                 let y = bounds.top() + line_height * li as f32;
-                // 1px-wide (thinner) caret, nudged 1px left so it has a touch more margin on
-                // its right edge before the next glyph.
-                caret = Some(fill(
-                    Bounds::new(
-                        point(text_x + x - px(1.0), y),
-                        gpui::size(px(1.0), line_height),
-                    ),
-                    theme::get().caret,
-                ));
+                if vim_block {
+                    // Width = the glyph under the cursor; at line end fall back to one cell.
+                    let end = editor.vim_cursor_char_end(cursor);
+                    let w = if end > cursor {
+                        (line.x_for_index(end - start) - x).max(px(2.0))
+                    } else {
+                        px(theme::get().editor_font_size * 0.6)
+                    };
+                    // Translucent so the underlying character (painted before the caret quad)
+                    // stays readable through the block.
+                    let mut col = theme::get().caret;
+                    col.a = 0.42;
+                    caret = Some(fill(
+                        Bounds::new(point(text_x + x, y), gpui::size(w, line_height)),
+                        col,
+                    ));
+                } else {
+                    // 1px-wide (thinner) caret, nudged 1px left so it has a touch more margin
+                    // on its right edge before the next glyph.
+                    caret = Some(fill(
+                        Bounds::new(
+                            point(text_x + x - px(1.0), y),
+                            gpui::size(px(1.0), line_height),
+                        ),
+                        theme::get().caret,
+                    ));
+                }
             }
         } else if !sel.is_empty() {
             // paint a rect per covered display row
